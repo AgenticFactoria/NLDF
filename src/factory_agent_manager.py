@@ -18,7 +18,6 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from agents import Agent, Runner, SQLiteSession
 
 from config.settings import MQTT_BROKER_HOST, MQTT_BROKER_PORT
-from config.topics import AGENT_COMMANDS_TOPIC, AGENT_RESPONSES_TOPIC
 from shared_order_manager import SharedOrderManager
 from utils.mqtt_client import MQTTClient
 from utils.topic_manager import TopicManager
@@ -81,8 +80,8 @@ class FactoryAgentManager:
 
         # Order management
         self.shared_order_manager = SharedOrderManager()
-        
-        # Topic management  
+
+        # Topic management
         self.topic_manager = TopicManager("AgenticFactoria")
 
         # Agent history and session management
@@ -179,7 +178,7 @@ Remember: P3 products require double processing at StationB and StationC.
             self.mqtt_client.connect()
 
             # Subscribe to command responses
-            response_topic = AGENT_RESPONSES_TOPIC.replace("{line_id}", self.line_id)
+            response_topic = f"{self.topic_manager.root}/response/{self.line_id}"
             self.mqtt_client.subscribe(response_topic, self._on_response_message)
             logger.info(f"Subscribed to response topic: {response_topic}")
 
@@ -187,7 +186,9 @@ Remember: P3 products require double processing at StationB and StationC.
             self.mqtt_client.subscribe(
                 self.topic_manager.get_order_topic(), self._on_order_message
             )
-            logger.info(f"Subscribed to order topic: {self.topic_manager.get_order_topic()}")
+            logger.info(
+                f"Subscribed to order topic: {self.topic_manager.get_order_topic()}"
+            )
 
             for line in ["line1"]:
                 root_topic = "AgenticFactoria"
@@ -559,7 +560,7 @@ Maximum 2 commands for focused response.
     async def _execute_reactive_commands(self, commands: List[Dict], event_type: str):
         """Execute reactive commands generated from critical events."""
         try:
-            command_topic = AGENT_COMMANDS_TOPIC.replace("{line_id}", self.line_id)
+            command_topic = self.topic_manager.get_agent_command_topic(self.line_id)
 
             for command in commands:
                 # Add reactive metadata
@@ -737,7 +738,7 @@ Respond with JSON array of commands only. Each command must specify action, targ
                 return
 
             # Execute each command via MQTT
-            command_topic = AGENT_COMMANDS_TOPIC.replace("{line_id}", self.line_id)
+            command_topic = self.topic_manager.get_agent_command_topic(self.line_id)
 
             for command in commands:
                 # Add timestamp and ensure command_id
