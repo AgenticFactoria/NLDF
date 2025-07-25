@@ -12,17 +12,16 @@ import sys
 from datetime import datetime
 from typing import Any, Dict, List
 
-from config.schemas import AgentCommandList
-
 # Add parent directory to path to import modules
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from agents import Agent, AgentOutputSchema, Runner, SQLiteSession
+from agents import Agent, Runner, SQLiteSession
 
 from config.settings import MQTT_BROKER_HOST, MQTT_BROKER_PORT
 from config.topics import AGENT_COMMANDS_TOPIC, AGENT_RESPONSES_TOPIC
 from shared_order_manager import SharedOrderManager
 from utils.mqtt_client import MQTTClient
+from utils.topic_manager import TopicManager
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
@@ -82,6 +81,9 @@ class FactoryAgentManager:
 
         # Order management
         self.shared_order_manager = SharedOrderManager()
+        
+        # Topic management  
+        self.topic_manager = TopicManager("AgenticFactoria")
 
         # Agent history and session management
         self.command_history = AgentCommandHistory()
@@ -97,6 +99,10 @@ class FactoryAgentManager:
         # Processing control
         self.is_processing = False
         self.processing_interval = 5.0  # Process every 5 seconds
+
+        # Reactive event processing
+        self.reactive_queue = asyncio.Queue(maxsize=50)
+        self.is_running = False
 
     def _create_factory_agent(self) -> Agent:
         """Create the factory AI agent with specific instructions."""
@@ -163,8 +169,7 @@ Remember: P3 products require double processing at StationB and StationC.
         return Agent(
             name=f"FactoryAgent_{self.line_id}",
             instructions=instructions,
-            model="gpt-4.1-mini",
-            output_type=AgentOutputSchema(AgentCommandList, strict_json_schema=False),
+            model="gpt-4o-mini",
         )
 
     def start_mqtt_listening(self):
@@ -177,6 +182,12 @@ Remember: P3 products require double processing at StationB and StationC.
             response_topic = AGENT_RESPONSES_TOPIC.replace("{line_id}", self.line_id)
             self.mqtt_client.subscribe(response_topic, self._on_response_message)
             logger.info(f"Subscribed to response topic: {response_topic}")
+
+            # Subscribe to order topic to receive new orders
+            self.mqtt_client.subscribe(
+                self.topic_manager.get_order_topic(), self._on_order_message
+            )
+            logger.info(f"Subscribed to order topic: {self.topic_manager.get_order_topic()}")
 
             for line in ["line1"]:
                 root_topic = "AgenticFactoria"
@@ -214,6 +225,27 @@ Remember: P3 products require double processing at StationB and StationC.
 
         except Exception as e:
             logger.error(f"Error processing response message: {e}")
+
+    def _on_order_message(self, topic: str, payload: bytes):
+        """Handle incoming order MQTT messages."""
+        try:
+            payload_str = payload.decode("utf-8")
+            order_data = json.loads(payload_str)
+
+            logger.info(f"Received new order on topic {topic}: {order_data}")
+
+            # Process the order using SharedOrderManager
+            order = self.shared_order_manager.process_order(order_data, self.line_id)
+
+            if order:
+                logger.info(
+                    f"Successfully processed order {order.order_id} with {len(order.products)} products"
+                )
+            else:
+                logger.warning(f"Failed to process order from MQTT: {order_data}")
+
+        except Exception as e:
+            logger.error(f"Error processing order message: {e}")
 
     def _on_station_status_message(self, topic: str, payload: bytes):
         """Handle station status updates and trigger reactive decisions."""
@@ -294,7 +326,7 @@ Remember: P3 products require double processing at StationB and StationC.
             warehouse_data = json.loads(payload_str)
 
             logger.info(
-                f"Warehouse status update: {len(warehouse_data.get('buffer', []))} products"
+                f"RawMaterial Warehouse status update: {len(warehouse_data.get('buffer', []))} products"
             )
 
             # Update current factory state
@@ -329,17 +361,31 @@ Remember: P3 products require double processing at StationB and StationC.
         status = station_data.get("status", "unknown")
         buffer = station_data.get("buffer", [])
 
-        # Reactive triggers for station status
-        if status == "idle" and len(buffer) > 0:
-            logger.info(
-                f"Station {station_id} is idle but has products in buffer - may need AGV pickup"
-            )
-            asyncio.create_task(self._reactive_process_station_idle(station_id, buffer))
-        elif status == "blocked":
+        # Only trigger agent for critical station issues that require immediate action
+        if status == "blocked":
             logger.warning(
-                f"Station {station_id} is blocked - may need immediate attention"
+                f"Station {station_id} is blocked - needs immediate attention"
             )
-            asyncio.create_task(self._reactive_process_station_blocked(station_id))
+            self._queue_critical_event(
+                "station_blocked", {"station_id": station_id, "severity": "high"}
+            )
+        elif status == "idle" and len(buffer) > 3:  # Only if significant backup
+            logger.info(
+                f"Station {station_id} idle with {len(buffer)} products - may need pickup"
+            )
+            self._queue_critical_event(
+                "station_idle_with_backup",
+                {
+                    "station_id": station_id,
+                    "buffer_count": len(buffer),
+                    "severity": "medium",
+                },
+            )
+        else:
+            # For minor status changes, just log - don't trigger agent
+            logger.debug(
+                f"Station {station_id} status: {status}, buffer: {len(buffer)}"
+            )
 
     def _handle_agv_status_change(self, agv_id: str, agv_data: Dict[str, Any]):
         """Handle AGV status changes and trigger reactive decisions."""
@@ -348,20 +394,36 @@ Remember: P3 products require double processing at StationB and StationC.
         current_point = agv_data.get("current_point", "unknown")
         payload = agv_data.get("payload", [])
 
-        # Reactive triggers for AGV status
-        if status == "idle" and len(payload) == 0:
-            logger.info(
-                f"AGV {agv_id} is idle and empty at {current_point} - checking for work"
-            )
-            asyncio.create_task(self._reactive_process_idle_agv(agv_id, current_point))
-        elif battery < 30 and status != "charging":
+        # Only trigger agent for critical AGV issues
+        if battery < 20 and status != "charging":  # Critical battery level
             logger.warning(
-                f"AGV {agv_id} has low battery ({battery}%) - needs charging"
+                f"AGV {agv_id} has critically low battery ({battery}%) - immediate charging needed"
             )
-            asyncio.create_task(self._reactive_process_low_battery(agv_id))
-        elif status == "idle" and len(payload) > 0:
-            logger.info(f"AGV {agv_id} is idle but carrying products - needs to unload")
-            asyncio.create_task(self._reactive_process_loaded_idle_agv(agv_id, payload))
+            self._queue_critical_event(
+                "agv_critical_battery",
+                {
+                    "agv_id": agv_id,
+                    "battery_level": battery,
+                    "current_point": current_point,
+                    "severity": "high",
+                },
+            )
+        elif status == "idle" and len(payload) > 0:  # Loaded but stuck
+            logger.info(f"AGV {agv_id} is idle but loaded - needs to unload")
+            self._queue_critical_event(
+                "agv_loaded_idle",
+                {
+                    "agv_id": agv_id,
+                    "payload_count": len(payload),
+                    "current_point": current_point,
+                    "severity": "medium",
+                },
+            )
+        else:
+            # For routine status changes (normal idle, normal battery), just log
+            logger.debug(
+                f"AGV {agv_id} status: {status} at {current_point}, battery: {battery}%"
+            )
 
     def _handle_conveyor_status_change(
         self, conveyor_id: str, conveyor_data: Dict[str, Any]
@@ -382,125 +444,144 @@ Remember: P3 products require double processing at StationB and StationC.
 
         logger.critical(f"Factory alert {alert_type} for device {device_id}")
 
-        # Trigger immediate reactive processing for critical alerts
-        if alert_type in ["buffer_full", "agv_battery_low", "device_fault"]:
-            asyncio.create_task(self._reactive_process_critical_alert(alert_data))
+        # Only queue truly critical alerts that require agent intervention
+        if alert_type in ["device_fault", "emergency_stop", "fire_alarm"]:
+            self._queue_critical_event(
+                "critical_alert",
+                {
+                    "alert_type": alert_type,
+                    "device_id": device_id,
+                    "severity": "critical",
+                },
+            )
+        elif alert_type in ["buffer_full", "agv_battery_low"]:
+            self._queue_critical_event(
+                "operational_alert",
+                {"alert_type": alert_type, "device_id": device_id, "severity": "high"},
+            )
+        else:
+            # Log other alerts but don't trigger agent processing
+            logger.info(f"Non-critical alert logged: {alert_type} for {device_id}")
 
-    async def _reactive_process_station_idle(self, station_id: str, buffer: List[str]):
-        """React to idle station with products in buffer."""
-        if self.is_processing:
-            return  # Avoid conflicts with main processing
-
-        logger.info(
-            f"Reactive processing: Station {station_id} idle with {len(buffer)} products"
-        )
-
-        # Generate quick reactive commands
-        context = {
-            "reactive_trigger": f"station_{station_id}_idle",
-            "buffer_count": len(buffer),
+    def _queue_critical_event(self, event_type: str, event_data: Dict[str, Any]):
+        """Queue only critical events that require agent intervention."""
+        event = {
+            "type": event_type,
+            "data": event_data,
+            "timestamp": datetime.now().timestamp(),
+            "severity": event_data.get("severity", "medium"),
         }
-        await self._generate_reactive_commands(context)
 
-    async def _reactive_process_station_blocked(self, station_id: str):
-        """React to blocked station."""
-        logger.warning(f"Reactive processing: Station {station_id} blocked")
-
-        context = {"reactive_trigger": f"station_{station_id}_blocked"}
-        await self._generate_reactive_commands(context)
-
-    async def _reactive_process_idle_agv(self, agv_id: str, current_point: str):
-        """React to idle AGV."""
-        logger.info(f"Reactive processing: AGV {agv_id} idle at {current_point}")
-
-        context = {"reactive_trigger": f"agv_{agv_id}_idle", "location": current_point}
-        await self._generate_reactive_commands(context)
-
-    async def _reactive_process_low_battery(self, agv_id: str):
-        """React to low battery AGV."""
-        logger.warning(f"Reactive processing: AGV {agv_id} low battery")
-
-        context = {"reactive_trigger": f"agv_{agv_id}_low_battery"}
-        await self._generate_reactive_commands(context)
-
-    async def _reactive_process_loaded_idle_agv(self, agv_id: str, payload: List[str]):
-        """React to loaded but idle AGV."""
-        logger.info(
-            f"Reactive processing: AGV {agv_id} loaded but idle with {len(payload)} products"
-        )
-
-        context = {
-            "reactive_trigger": f"agv_{agv_id}_loaded_idle",
-            "payload_count": len(payload),
-        }
-        await self._generate_reactive_commands(context)
-
-    async def _reactive_process_critical_alert(self, alert_data: Dict[str, Any]):
-        """React to critical factory alerts."""
-        logger.critical(f"Reactive processing: Critical alert {alert_data}")
-
-        context = {"reactive_trigger": "critical_alert", "alert": alert_data}
-        await self._generate_reactive_commands(context)
-
-    async def _generate_reactive_commands(self, reactive_context: Dict[str, Any]):
-        """Generate and execute reactive commands based on real-time events."""
         try:
-            if self.is_processing:
-                logger.debug("Main processing active, skipping reactive commands")
-                return
+            self.reactive_queue.put_nowait(event)
+            logger.info(
+                f"Queued critical event: {event_type} (severity: {event_data.get('severity')})"
+            )
+        except asyncio.QueueFull:
+            logger.error(f"Critical event queue is full, dropping {event_type} event")
 
-            logger.info(f"Generating reactive commands for: {reactive_context}")
+    async def _process_critical_events(self):
+        """Process critical events from the queue using the agent with session."""
+        logger.info("Starting critical event processor...")
 
-            # Create reactive query for the agent
-            query = f"""
-REACTIVE FACTORY EVENT:
-{json.dumps(reactive_context, indent=2)}
+        while self.is_running:
+            try:
+                # Wait for a critical event with timeout
+                event = await asyncio.wait_for(self.reactive_queue.get(), timeout=2.0)
 
-CURRENT FACTORY STATE:
+                # Only process if not doing main order processing
+                if self.is_processing:
+                    logger.debug(
+                        f"Main processing active, deferring critical event: {event['type']}"
+                    )
+                    # Put it back in the queue for later
+                    await asyncio.sleep(1.0)
+                    try:
+                        self.reactive_queue.put_nowait(event)
+                    except asyncio.QueueFull:
+                        logger.warning("Queue full, dropping deferred event")
+                    continue
+
+                severity = event["data"].get("severity", "medium")
+                event_type = event["type"]
+
+                logger.info(
+                    f"Processing critical event: {event_type} (severity: {severity})"
+                )
+
+                # Create agent query for the critical event
+                query = f"""
+CRITICAL FACTORY EVENT - IMMEDIATE RESPONSE NEEDED
+
+Event Type: {event_type}
+Severity: {severity}
+Event Data: {json.dumps(event["data"], indent=2)}
+
+Current Factory State:
 {json.dumps(self.current_factory_state, indent=2)}
 
-RECENT COMMAND HISTORY:
-{json.dumps(self.command_history.get_recent_commands(3), indent=2)}
+Recent Commands:
+{json.dumps(self.command_history.get_recent_commands(2), indent=2)}
 
 TASK:
-A reactive event has occurred in the factory. Analyze the situation and generate immediate corrective actions if needed.
+A critical event has occurred requiring immediate action. Analyze and provide specific commands to address this issue.
 
-Focus on:
-1. Addressing the specific reactive trigger
-2. Preventing bottlenecks or inefficiencies
-3. Maintaining production flow
-4. Quick, targeted responses (1-2 commands max)
+Priority actions based on severity:
+- CRITICAL: Immediate safety/emergency response
+- HIGH: Urgent operational fixes (battery, blockages)  
+- MEDIUM: Preventive actions to avoid problems
 
-Respond with JSON array of commands, or empty array [] if no immediate action is needed.
+Respond with JSON array of commands, or empty array [] if no action needed.
+Maximum 2 commands for focused response.
 """
 
-            # Run reactive agent decision
-            result = await Runner.run(self.agent, query, session=self.session)
+                # Run the agent with session to preserve context
+                result = await Runner.run(self.agent, query, session=self.session)
 
-            # Parse and execute reactive commands
-            commands = result.final_output.get("commands", [])
+                # Parse and execute commands
+                commands = result.final_output.get("commands", [])
 
-            if commands:
-                logger.info(f"Executing {len(commands)} reactive commands")
-                command_topic = AGENT_COMMANDS_TOPIC.replace("{line_id}", self.line_id)
+                if commands:
+                    logger.info(
+                        f"Executing {len(commands)} reactive commands for {event_type}"
+                    )
+                    await self._execute_reactive_commands(commands, event_type)
+                else:
+                    logger.info(f"No reactive commands needed for {event_type}")
 
-                for command in commands:
-                    if "command_id" not in command:
-                        command["command_id"] = f"reactive_{datetime.now().timestamp()}"
+            except asyncio.TimeoutError:
+                # No critical events, continue monitoring
+                continue
+            except Exception as e:
+                logger.error(f"Error processing critical event: {e}")
+                await asyncio.sleep(1.0)
 
-                    # Mark as reactive command
-                    command["reactive"] = True
+    async def _execute_reactive_commands(self, commands: List[Dict], event_type: str):
+        """Execute reactive commands generated from critical events."""
+        try:
+            command_topic = AGENT_COMMANDS_TOPIC.replace("{line_id}", self.line_id)
 
-                    self.command_history.add_command(command)
-                    self.mqtt_client.publish(command_topic, json.dumps(command))
+            for command in commands:
+                # Add reactive metadata
+                if "command_id" not in command:
+                    command["command_id"] = (
+                        f"reactive_{event_type}_{datetime.now().timestamp()}"
+                    )
 
-                    logger.info(f"Published reactive command: {command}")
-                    await asyncio.sleep(0.1)
-            else:
-                logger.info("No reactive commands needed")
+                command["reactive"] = True
+                command["trigger_event"] = event_type
+
+                # Add to history
+                self.command_history.add_command(command)
+
+                # Publish via MQTT
+                self.mqtt_client.publish(command_topic, json.dumps(command))
+
+                logger.info(f"Published reactive command: {command}")
+                await asyncio.sleep(0.1)
 
         except Exception as e:
-            logger.error(f"Error generating reactive commands: {e}")
+            logger.error(f"Error executing reactive commands: {e}")
 
     async def process_orders_cycle(self):
         """Main processing cycle - get orders and generate AGV commands."""
@@ -624,13 +705,32 @@ Respond with JSON array of commands only. Each command must specify action, targ
 
         return query
 
-    async def _execute_agent_commands(self, agent_output: str, processed_orders: List):
+    async def _execute_agent_commands(self, agent_output: Any, processed_orders: List):
         """Parse and execute commands generated by the agent."""
         try:
             logger.info(f"Agent output: {agent_output}")
 
-            # Try to extract JSON from agent output
-            commands = agent_output.get("commands", [])
+            # Handle different output types from the agent
+            commands = []
+            if isinstance(agent_output, dict):
+                commands = agent_output.get("commands", [])
+            elif isinstance(agent_output, str):
+                # Try to parse JSON from string output
+                try:
+                    if agent_output.strip().startswith("```json"):
+                        # Extract JSON from markdown code block
+                        json_str = (
+                            agent_output.split("```json")[1].split("```")[0].strip()
+                        )
+                        commands = json.loads(json_str)
+                    else:
+                        commands = json.loads(agent_output)
+                except json.JSONDecodeError:
+                    logger.error("Failed to parse agent output as JSON")
+                    return
+            else:
+                logger.error(f"Unexpected agent output type: {type(agent_output)}")
+                return
 
             if not commands:
                 logger.warning("No valid commands generated by agent")
@@ -688,23 +788,37 @@ Respond with JSON array of commands only. Each command must specify action, targ
         return True
 
     async def start_continuous_processing(self):
-        """Start continuous order processing."""
-        logger.info("Starting continuous order processing...")
+        """Start continuous order processing with reactive event handling."""
+        logger.info("Starting continuous order processing with reactive monitoring...")
+        self.is_running = True
 
         # Start MQTT listening
         self.start_mqtt_listening()
 
-        # Start processing loop
-        while True:
+        # Start critical event processor as background task
+        critical_event_task = asyncio.create_task(self._process_critical_events())
+
+        try:
+            # Main processing loop
+            while self.is_running:
+                try:
+                    await self.process_orders_cycle()
+                    await asyncio.sleep(self.processing_interval)
+                except KeyboardInterrupt:
+                    logger.info("Stopping continuous processing...")
+                    break
+                except Exception as e:
+                    logger.error(f"Error in continuous processing: {e}")
+                    await asyncio.sleep(self.processing_interval)
+        finally:
+            # Clean shutdown
+            self.is_running = False
+            critical_event_task.cancel()
             try:
-                await self.process_orders_cycle()
-                await asyncio.sleep(self.processing_interval)
-            except KeyboardInterrupt:
-                logger.info("Stopping continuous processing...")
-                break
-            except Exception as e:
-                logger.error(f"Error in continuous processing: {e}")
-                await asyncio.sleep(self.processing_interval)
+                await critical_event_task
+            except asyncio.CancelledError:
+                logger.info("Critical event processor stopped")
+                pass
 
     def stop(self):
         """Stop the agent manager."""
