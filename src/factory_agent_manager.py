@@ -168,7 +168,7 @@ Remember: P3 products require double processing at StationB and StationC.
         return Agent(
             name=f"FactoryAgent_{self.line_id}",
             instructions=instructions,
-            model="gpt-4o-mini",
+            model="gpt-4.1-mini",
         )
 
     def start_mqtt_listening(self):
