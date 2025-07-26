@@ -9,6 +9,8 @@
 
 The NLDF project represents a cutting-edge fusion of artificial intelligence and industrial automation, creating an intelligent factory simulation system that demonstrates the future of Industry 4.0. This system uses natural language processing and AI agents to autonomously manage a multi-line production facility with real-time decision-making capabilities.
 
+Context and Background of the project: https://ofra65wfwe.feishu.cn/wiki/SRgrwj9LWimsTikRFdzcVvlDnEU
+
 ## 🚀 Key Features
 
 - **AI-Driven Decision Making**: OpenAI Agent SDK powers intelligent production line management
