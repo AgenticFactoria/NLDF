@@ -1,4 +1,20 @@
-# SUPCON NLDF (Natual Language Driven Factory) Simulator
+# SUPCON NLDF (Natural Language Driven Factory) Simulator
+
+## Architecture Overview
+
+This project implements a modular factory automation system with separated concerns:
+
+### New Modular Architecture (Recommended)
+
+- **MQTT Listener Manager** (`src/mqtt_listener_manager.py`): Handles all MQTT subscriptions and maintains factory state
+- **Line Commander** (`src/line_commander.py`): Central decision-making component that coordinates AGV operations
+- **Product Flow Agent** (`src/product_flow_agent.py`): Specialized AI agent that understands complete product workflow
+- **Order MQTT Handler** (`src/order_mqtt_handler.py`): Processes order-related messages
+- **Main Entry Point** (`main_line_commander.py`): Runs the new modular system
+
+### Legacy Architecture
+
+- **Factory Agent Manager** (`src/factory_agent_manager.py`): Original monolithic implementation
 
 ## Quick Start
 
@@ -34,7 +50,57 @@ uv sync
 uv run run_multi_line_simulation.py (--menu) (--no-mqtt)
 ```
 
-### 3. Unity Run
+### 3. Run New Modular Agent System
+
+#### Multi-Line Factory System (Recommended)
+
+Run all 3 production lines simultaneously with intelligent coordination:
+
+```bash
+# Set your OpenAI API key
+export OPENAI_API_KEY='your-api-key-here'
+
+# Optional: Configure system parameters
+export MAX_ORDERS_PER_CYCLE='2'
+export TOPIC_ROOT='your-topic-root'
+
+# Run the complete multi-line factory system
+uv run main.py
+```
+
+#### Single Line System
+
+Run a single production line for testing or development:
+
+```bash
+# Set your OpenAI API key
+export OPENAI_API_KEY='your-api-key-here'
+
+# Optional: Set line ID and max orders per cycle
+export LINE_ID='line1'
+export MAX_ORDERS_PER_CYCLE='2'
+
+# Run single line commander system
+uv run main_line_commander.py
+```
+
+#### Monitoring Dashboard
+
+Monitor all production lines in real-time:
+
+```bash
+# Run the monitoring dashboard (in a separate terminal)
+uv run monitor_dashboard.py
+```
+
+#### Legacy System
+
+```bash
+# Run the original factory agent manager
+uv run main_factory_system.py
+```
+
+### 4. Unity Run
 
 1. 设置 `StreamingAssets/MQTTBroker.json`中的 Root_Topic_Head 字段与上述的 topic root 一致，并修改 wss.client_id 字段防止 client 冲突。
 2. 使用 VScode Live Server 插件，选中到 index.html 文件后 go live 初始化给予 WebGL 的 Unity 前端界面
@@ -48,6 +114,146 @@ uv run run_multi_line_simulation.py (--menu) (--no-mqtt)
 
    "common*topic":{
    "Root_Topic_Head": "\*\*\_NLDF1*\*\*"},
+
+## Multi-Line Factory System
+
+### Complete Factory Automation
+
+The new system manages all 3 production lines simultaneously:
+
+- **Line 1**: AGV_1 & AGV_2 with specialized P3 processing
+- **Line 2**: AGV_1 & AGV_2 with specialized P3 processing
+- **Line 3**: AGV_1 & AGV_2 with specialized P3 processing
+- **Total**: 6 AGVs coordinated by 3 Line Commanders
+- **Monitoring**: Real-time dashboard for all lines
+
+### Key Features
+
+- **Concurrent Operations**: All 3 lines operate simultaneously
+- **Independent Decision Making**: Each line has its own Line Commander
+- **Shared Resources**: Common warehouse and order management
+- **Real-time Monitoring**: Live dashboard showing all line statuses
+- **Graceful Shutdown**: Proper cleanup of all resources
+- **Error Recovery**: Individual line failure doesn't affect others
+
+## System Improvements
+
+### New Modular Architecture Benefits
+
+1. **Separated Concerns**:
+
+   - MQTT communication is isolated in `MQTTListenerManager`
+   - Decision-making logic is centralized in `LineCommander`
+   - Order processing is handled by dedicated `OrderMQTTHandler`
+
+2. **Better Responsiveness**:
+
+   - Reactive event processing for critical factory events (battery low, blockages, alerts)
+   - Planned operation cycles for regular order processing
+   - Prioritized decision queue based on event severity
+
+3. **Improved Maintainability**:
+
+   - Clear separation between MQTT handling and AI decision-making
+   - Modular components that can be tested and modified independently
+   - Better error handling and logging
+
+4. **Enhanced Decision Making**:
+
+   - Context-aware AI agent with factory state awareness
+   - Both planned and reactive decision modes
+   - Command history and session management for learning
+   - Specialized Product Flow Agent that understands complete workflow
+
+5. **Product Flow Intelligence**:
+   - Understands successful product flow patterns (P1/P2 vs P3 workflows)
+   - Optimizes AGV operations based on actual factory workflow
+   - Prioritizes critical tasks: RawMaterial pickup and QualityCheck delivery
+   - Handles P3 double processing automatically
+
+### Key Features
+
+- **Dual Processing Modes**: Planned operations (every 8 seconds) and reactive processing (within 2 seconds for critical events)
+- **Event Prioritization**: Critical, High, Medium, Low severity levels for different factory events
+- **State Management**: Centralized factory state maintained by MQTT listener
+- **Command Tracking**: Full command history with responses and execution tracking
+- **Product Flow Intelligence**: Specialized agent that understands complete product workflows
+
+### Successful Product Flow (Based on Real Factory Data)
+
+#### P1/P2 Products (Single Processing):
+
+1. **AGV → P0 (RawMaterial)** → load specific product_id
+2. **AGV → P1 (StationA)** → unload (automatic processing starts)
+3. **[AUTOMATIC]** StationA → Conveyor_AB → StationB → Conveyor_BC → StationC → Conveyor_CQ → QualityCheck
+4. **AGV → P8 (QualityCheck)** → load finished product
+5. **AGV → P9 (Warehouse)** → unload finished product
+
+#### P3 Products (Double Processing):
+
+1. **AGV → P0 (RawMaterial)** → load specific product_id (e.g., 'prod_3_75a16c3d')
+2. **AGV → P1 (StationA)** → unload
+3. **[AUTOMATIC]** StationA → Conveyor_AB → StationB → Conveyor_BC → StationC → Conveyor_CQ (**upper_buffer**)
+4. **🚨 CRITICAL: Only AGV_2 → P6 (Conveyor_CQ)** → load same product_id from **upper_buffer**
+5. **AGV_2 → P3 (StationB)** → unload (second processing cycle)
+6. **[AUTOMATIC]** StationB → Conveyor_BC → StationC → Conveyor_CQ → QualityCheck
+7. **AGV → P8 (QualityCheck)** → load same product_id (finished product)
+8. **AGV → P9 (Warehouse)** → unload finished product
+
+#### 🚨 Critical AGV Buffer Access Restrictions:
+
+- **AGV_1 at P6**: Can only access Conveyor_CQ `lower_buffer`
+- **AGV_2 at P6**: Can only access Conveyor_CQ `upper_buffer`
+- **P3 products after first processing**: Go to `upper_buffer`
+- **Therefore**: **ONLY AGV_2 can handle P3 second processing!**
+
+#### Exact P3 Command Sequence (Based on Real Factory Data):
+
+```json
+[
+  // Stage 1: RawMaterial → StationA (Any AGV can do this)
+  { "action": "move", "target": "AGV_1", "params": { "target_point": "P0" } },
+  {
+    "action": "load",
+    "target": "AGV_1",
+    "params": { "product_id": "prod_3_75a16c3d" }
+  },
+  { "action": "move", "target": "AGV_1", "params": { "target_point": "P1" } },
+  { "action": "unload", "target": "AGV_1", "params": {} },
+
+  // Stage 2: Conveyor_CQ upper_buffer → StationB (ONLY AGV_2!)
+  { "action": "move", "target": "AGV_2", "params": { "target_point": "P6" } },
+  {
+    "action": "load",
+    "target": "AGV_2",
+    "params": { "product_id": "prod_3_75a16c3d" }
+  },
+  { "action": "move", "target": "AGV_2", "params": { "target_point": "P3" } },
+  { "action": "unload", "target": "AGV_1", "params": {} },
+  { "action": "move", "target": "AGV_1", "params": { "target_point": "P8" } },
+  {
+    "action": "load",
+    "target": "AGV_1",
+    "params": { "product_id": "prod_3_75a16c3d" }
+  },
+  { "action": "move", "target": "AGV_1", "params": { "target_point": "P9" } },
+  { "action": "unload", "target": "AGV_1", "params": {} }
+]
+```
+
+#### Key Insights:
+
+- **AGV is only needed for**: RawMaterial→StationA, QualityCheck→Warehouse, (P3: Conveyor_CQ→StationB)
+- **Stations and conveyors** handle processing automatically (5 seconds each)
+- **Monitor RawMaterial buffer** for new products to start production
+- **Monitor QualityCheck output_buffer** for finished products to deliver
+- **P3 Critical**: Monitor Conveyor_CQ upper_buffer/lower_buffer for P3 products needing second processing
+
+#### P3 Product Detection:
+
+- **Raw Materials**: Products with 'prod_3' in product_id (e.g., 'prod_3_75a16c3d')
+- **Second Processing**: P3 products in Conveyor_CQ upper_buffer or lower_buffer
+- **Finished Products**: P3 products in QualityCheck output_buffer after double processing
 
 ## Background
 
