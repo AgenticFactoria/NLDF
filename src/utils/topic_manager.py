@@ -1,4 +1,9 @@
-# src/utils/topic_manager.py
+"""
+MQTT Topic Manager
+Centralized management of all MQTT topics for the factory automation system.
+Ensures consistent topic structure and easy maintenance.
+"""
+
 from typing import Dict, Optional
 
 
@@ -76,5 +81,4 @@ class TopicManager:
         """Generates the response topic for agent commands."""
         if line_id:
             return f"{self.root}/response/{line_id}"
-        else:
-            return f"{self.root}/response/general"
+        return f"{self.root}/response/general"

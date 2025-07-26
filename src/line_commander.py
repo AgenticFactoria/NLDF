@@ -40,7 +40,7 @@ class LineCommander:
         self.product_flow_agent = ProductFlowAgent(line_id, self.shared_order_manager)
 
         # Decision making state
-        self.decision_queue = asyncio.Queue(maxsize=100)
+        self.decision_queue = asyncio.Queue(maxsize=1000)
         self.command_history = []
         self.is_running = False
 
@@ -139,7 +139,20 @@ class LineCommander:
                 {
                     "agv_id": agv_id,
                     "payload_count": len(payload),
+                    "payload": payload,
                     "current_point": current_point,
+                    "severity": "high",
+                    "data": data,
+                },
+            )
+        elif current_point == "P8" and status == "idle" and len(payload) == 0:
+            # AGV reached QualityCheck and is ready to load finished products
+            self._queue_decision_event(
+                "agv_at_quality_check_ready",
+                {
+                    "agv_id": agv_id,
+                    "current_point": current_point,
+                    "battery_level": battery,
                     "severity": "high",
                     "data": data,
                 },
@@ -361,11 +374,13 @@ class LineCommander:
 
         logger.info(f"Processing reactive event: {event_type} (severity: {severity})")
 
-        # Generate and execute commands for available AGVs
-        commands = await self._generate_agent_commands()
+        # Generate and execute commands for available AGVs with reactive event context
+        commands = await self._generate_agent_commands(event)
         await self._execute_commands(commands)
 
-    async def _generate_agent_commands(self) -> List[Dict[str, Any]]:
+    async def _generate_agent_commands(
+        self, reactive_event: Dict[str, Any] = None
+    ) -> List[Dict[str, Any]]:
         """Generate commands for available AGVs using the specialized product flow agent."""
         try:
             # Get current factory state from MQTT listener
@@ -374,7 +389,7 @@ class LineCommander:
             # Use specialized product flow agent for command generation
             commands = (
                 await self.product_flow_agent.generate_commands_for_available_agvs(
-                    factory_state
+                    factory_state, reactive_event
                 )
             )
 

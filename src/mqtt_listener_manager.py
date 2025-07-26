@@ -11,9 +11,19 @@ import os
 from datetime import datetime
 from typing import Any, Callable, Dict, List
 
-from config.settings import MQTT_BROKER_HOST, MQTT_BROKER_PORT
-from utils.mqtt_client import MQTTClient
-from utils.topic_manager import TopicManager
+from src.config.schemas import (
+    AGVStatus,
+    ConveyorStatus,
+    FaultAlert,
+    KPIUpdate,
+    NewOrder,
+    StationStatus,
+    SystemResponse,
+    WarehouseStatus,
+)
+from src.config.settings import MQTT_BROKER_HOST, MQTT_BROKER_PORT
+from src.utils.mqtt_client import MQTTClient
+from src.utils.topic_manager import TopicManager
 
 logger = logging.getLogger(__name__)
 
@@ -97,27 +107,27 @@ class MQTTListenerManager:
         """Subscribe to all factory-related MQTT topics."""
 
         # Station status for this line
-        station_topic = f"{self.topic_root}/{self.line_id}/station/+/status"
+        station_topic = self.topic_manager.get_station_status_topic(self.line_id, "+")
         self.mqtt_client.subscribe(station_topic, self._on_station_status)
         logger.info(f"Subscribed to station status: {station_topic}")
 
         # AGV status for this line
-        agv_topic = f"{self.topic_root}/{self.line_id}/agv/+/status"
+        agv_topic = self.topic_manager.get_agv_status_topic(self.line_id, "+")
         self.mqtt_client.subscribe(agv_topic, self._on_agv_status)
         logger.info(f"Subscribed to AGV status: {agv_topic}")
 
         # Conveyor status for this line
-        conveyor_topic = f"{self.topic_root}/{self.line_id}/conveyor/+/status"
+        conveyor_topic = self.topic_manager.get_conveyor_status_topic(self.line_id, "+")
         self.mqtt_client.subscribe(conveyor_topic, self._on_conveyor_status)
         logger.info(f"Subscribed to conveyor status: {conveyor_topic}")
 
-        # Warehouse status (global)
-        warehouse_topic = f"{self.topic_root}/warehouse/+/status"
+        # Raw Material Warehouse status (global)
+        warehouse_topic = self.topic_manager.get_warehouse_status_topic("RawMaterial")
         self.mqtt_client.subscribe(warehouse_topic, self._on_warehouse_status)
-        logger.info(f"Subscribed to warehouse status: {warehouse_topic}")
+        logger.info(f"Subscribed to Rawmaterial warehouse status: {warehouse_topic}")
 
         # Alerts for this line
-        alerts_topic = f"{self.topic_root}/{self.line_id}/alerts"
+        alerts_topic = self.topic_manager.get_fault_alert_topic(self.line_id)
         self.mqtt_client.subscribe(alerts_topic, self._on_alerts)
         logger.info(f"Subscribed to alerts: {alerts_topic}")
 
@@ -127,7 +137,7 @@ class MQTTListenerManager:
         logger.info(f"Subscribed to orders: {orders_topic}")
 
         # Command responses for this line
-        response_topic = f"{self.topic_root}/response/{self.line_id}"
+        response_topic = self.topic_manager.get_agent_response_topic(self.line_id)
         self.mqtt_client.subscribe(response_topic, self._on_responses)
         logger.info(f"Subscribed to responses: {response_topic}")
 
@@ -147,32 +157,23 @@ class MQTTListenerManager:
             data = json.loads(payload.decode("utf-8"))
             station_id = topic.split("/")[-2]  # Extract station ID from topic
 
-            # Parse station-specific data
+            # Parse station-specific data using StationStatus schema
+
+            station_status = StationStatus(**data)
             parsed_data = {
-                "timestamp": data.get("timestamp", 0.0),
-                "source_id": data.get("source_id", station_id),
-                "status": data.get("status", "unknown"),
-                "message": data.get("message", ""),
-                "buffer": data.get("buffer", []),
-                "output_buffer": data.get("output_buffer", []),
-                "stats": data.get("stats", {}),
-                "last_updated": datetime.now().timestamp(),
+                "timestamp": station_status.timestamp,
+                "source_id": station_status.source_id,
+                "status": station_status.status,
+                "message": station_status.message,
+                "buffer": station_status.buffer,
+                "stats": station_status.stats,
+                "output_buffer": station_status.output_buffer,
             }
 
             # Update factory state
             self.factory_state["stations"][station_id] = parsed_data
 
-            # Safe length checking for potentially None buffers
-            buffer_len = len(parsed_data["buffer"]) if parsed_data.get("buffer") else 0
-            output_len = (
-                len(parsed_data["output_buffer"])
-                if parsed_data.get("output_buffer")
-                else 0
-            )
-
-            logger.debug(
-                f"Station {station_id} status: {parsed_data['status']}, buffer: {buffer_len}, output: {output_len}"
-            )
+            logger.debug(f"Station {station_id} status: {parsed_data['status']}")
 
             # Notify all registered handlers
             for handler in self.message_handlers["station_status"]:
@@ -191,31 +192,26 @@ class MQTTListenerManager:
             agv_id = topic.split("/")[-2]  # Extract AGV ID from topic
 
             # Parse AGV-specific data
+            agv_status = AGVStatus(**data)
             parsed_data = {
-                "timestamp": data.get("timestamp", 0.0),
-                "source_id": data.get("source_id", agv_id),
-                "status": data.get("status", "unknown"),
-                "speed_mps": data.get("speed_mps", 0.0),
-                "current_point": data.get("current_point", "unknown"),
-                "position": data.get("position", {}),
-                "target_point": data.get("target_point"),
-                "estimated_time": data.get("estimated_time", 0.0),
-                "payload": data.get("payload", []),
-                "battery_level": data.get("battery_level", 100.0),
-                "message": data.get("message", ""),
-                "last_updated": datetime.now().timestamp(),
+                "timestamp": agv_status.timestamp,
+                "source_id": agv_status.source_id,
+                "status": agv_status.status,
+                "speed_mps": agv_status.speed_mps,
+                "current_point": agv_status.current_point,
+                "position": agv_status.position,
+                "target_point": agv_status.target_point,
+                "estimated_time": agv_status.estimated_time,
+                "payload": agv_status.payload,
+                "battery_level": agv_status.battery_level,
+                "message": agv_status.message,
             }
 
             # Update factory state
             self.factory_state["agvs"][agv_id] = parsed_data
 
-            # Safe length checking for potentially None payload
-            payload_len = (
-                len(parsed_data["payload"]) if parsed_data.get("payload") else 0
-            )
-
             logger.debug(
-                f"AGV {agv_id} status: {parsed_data['status']} at {parsed_data['current_point']}, battery: {parsed_data['battery_level']}%, payload: {payload_len}"
+                f"AGV {agv_id} status: {parsed_data['status']} at {parsed_data['current_point']}, battery: {parsed_data['battery_level']}%"
             )
 
             # Notify all registered handlers
@@ -235,36 +231,21 @@ class MQTTListenerManager:
             conveyor_id = topic.split("/")[-2]  # Extract conveyor ID from topic
 
             # Parse conveyor-specific data
+            conveyor_status = ConveyorStatus(**data)
             parsed_data = {
-                "timestamp": data.get("timestamp", 0.0),
-                "source_id": data.get("source_id", conveyor_id),
-                "status": data.get("status", "unknown"),
-                "message": data.get("message", ""),
-                "buffer": data.get("buffer", []),
-                "upper_buffer": data.get("upper_buffer", []),
-                "lower_buffer": data.get("lower_buffer", []),
-                "last_updated": datetime.now().timestamp(),
+                "timestamp": conveyor_status.timestamp,
+                "source_id": conveyor_status.source_id,
+                "status": conveyor_status.status,
+                "buffer": conveyor_status.buffer,
+                "upper_buffer": conveyor_status.upper_buffer,
+                "lower_buffer": conveyor_status.lower_buffer,
+                "message": conveyor_status.message,
             }
 
             # Update factory state
             self.factory_state["conveyors"][conveyor_id] = parsed_data
 
-            # Safe length checking for potentially None buffers
-            buffer_len = len(parsed_data["buffer"]) if parsed_data.get("buffer") else 0
-            upper_len = (
-                len(parsed_data["upper_buffer"])
-                if parsed_data.get("upper_buffer")
-                else 0
-            )
-            lower_len = (
-                len(parsed_data["lower_buffer"])
-                if parsed_data.get("lower_buffer")
-                else 0
-            )
-
-            logger.debug(
-                f"Conveyor {conveyor_id} status: {parsed_data['status']}, buffer: {buffer_len}, upper: {upper_len}, lower: {lower_len}"
-            )
+            logger.debug(f"Conveyor {conveyor_id} status: {parsed_data['status']}")
 
             # Notify all registered handlers
             for handler in self.message_handlers["conveyor_status"]:
@@ -283,23 +264,20 @@ class MQTTListenerManager:
             warehouse_id = topic.split("/")[-2]  # Extract warehouse ID from topic
 
             # Parse warehouse-specific data
+            warehouse_status = WarehouseStatus(**data)
             parsed_data = {
-                "timestamp": data.get("timestamp", 0.0),
-                "source_id": data.get("source_id", warehouse_id),
-                "message": data.get("message", ""),
-                "buffer": data.get("buffer", []),
-                "stats": data.get("stats", {}),
-                "last_updated": datetime.now().timestamp(),
+                "timestamp": warehouse_status.timestamp,
+                "source_id": warehouse_status.source_id,
+                "message": warehouse_status.message,
+                "buffer": warehouse_status.buffer,
+                "stats": warehouse_status.stats,
             }
 
             # Update factory state
             self.factory_state["warehouse"] = parsed_data
 
-            # Safe length checking for potentially None buffer
-            buffer_len = len(parsed_data["buffer"]) if parsed_data.get("buffer") else 0
-
             logger.debug(
-                f"Warehouse {warehouse_id} status: {buffer_len} products, stats: {parsed_data['stats']}"
+                f"Warehouse {warehouse_id}: product IDs in the buffer {parsed_data['buffer']}, stats: {parsed_data['stats']}"
             )
 
             # Notify all registered handlers
@@ -317,18 +295,20 @@ class MQTTListenerManager:
         try:
             data = json.loads(payload.decode("utf-8"))
 
+            fault_alert = FaultAlert(**data)
+            parsed_data = fault_alert.model_dump()
+
             # Add to alerts list (keep last 50)
-            alert_entry = {**data, "timestamp": datetime.now().timestamp()}
-            self.factory_state["alerts"].append(alert_entry)
+            self.factory_state["alerts"].append(parsed_data)
             if len(self.factory_state["alerts"]) > 50:
                 self.factory_state["alerts"] = self.factory_state["alerts"][-50:]
 
-            logger.warning(f"Factory alert: {data}")
+            logger.warning(f"Factory alert: {parsed_data}")
 
             # Notify all registered handlers
             for handler in self.message_handlers["alerts"]:
                 try:
-                    handler("alert", data)
+                    handler("alert", parsed_data)
                 except Exception as e:
                     logger.error(f"Error in alert handler: {e}")
 
@@ -340,12 +320,15 @@ class MQTTListenerManager:
         try:
             data = json.loads(payload.decode("utf-8"))
 
-            logger.info(f"New order received: {data}")
+            orders = NewOrder(**data)
+            parsed_data = orders.model_dump()
+
+            logger.info(f"New order received: {parsed_data}")
 
             # Notify all registered handlers
             for handler in self.message_handlers["orders"]:
                 try:
-                    handler("order", data)
+                    handler("order", parsed_data)
                 except Exception as e:
                     logger.error(f"Error in order handler: {e}")
 
@@ -356,13 +339,15 @@ class MQTTListenerManager:
         """Handle command responses."""
         try:
             data = json.loads(payload.decode("utf-8"))
+            response = SystemResponse(**data)
+            parsed_data = response.model_dump()
 
-            logger.info(f"Command response: {data}")
+            logger.info(f"Command response: {parsed_data}")
 
             # Notify all registered handlers
             for handler in self.message_handlers["responses"]:
                 try:
-                    handler("response", data)
+                    handler("response", parsed_data)
                 except Exception as e:
                     logger.error(f"Error in response handler: {e}")
 
@@ -373,13 +358,15 @@ class MQTTListenerManager:
         """Handle KPI updates."""
         try:
             data = json.loads(payload.decode("utf-8"))
+            kpi = KPIUpdate(**data)
+            parsed_data = kpi.model_dump()
 
-            logger.info(f"KPI update: {data}")
+            logger.info(f"KPI update: {parsed_data}")
 
             # Notify all registered handlers
             for handler in self.message_handlers["kpi"]:
                 try:
-                    handler("kpi", data)
+                    handler("kpi", parsed_data)
                 except Exception as e:
                     logger.error(f"Error in KPI handler: {e}")
 
@@ -405,7 +392,6 @@ class MQTTListenerManager:
 
     def get_factory_state(self) -> Dict[str, Any]:
         """Get current factory state."""
-        self.factory_state["last_updated"] = datetime.now().timestamp()
         return self.factory_state.copy()
 
     def get_station_status(self, station_id: str) -> Dict[str, Any]:

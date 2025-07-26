@@ -8,10 +8,10 @@ optimal AGV commands based on the successful product flow pattern.
 import json
 import logging
 import os
-from datetime import datetime
 from typing import Any, Dict, List
 
 from agents import Agent, Runner, SQLiteSession
+from shared_order_manager import SharedOrderManager
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +21,7 @@ class ProductFlowAgent:
     Specialized agent that understands product flow and generates optimal AGV commands.
     """
 
-    def __init__(self, line_id: str, shared_order_manager=None):
+    def __init__(self, line_id: str, shared_order_manager: SharedOrderManager):
         self.line_id = line_id
         self.shared_order_manager = shared_order_manager
         self.agent = self._create_product_flow_agent()
@@ -96,10 +96,17 @@ P3 SPECIAL RULE: Only AGV_2 can access Conveyor_CQ upper_buffer at P6!
 
 DECISION PRIORITIES:
 1. CRITICAL: AGV battery < 20% → charge immediately
-2. HIGH: Finished products in QualityCheck → deliver to warehouse
-3. HIGH: P3 products in Conveyor_CQ upper_buffer → AGV_2 second processing
-4. HIGH: Raw materials available → start new production
-5. MEDIUM: AGV battery < 40% and idle → preventive charging
+2. HIGH: AGV has payload and is idle → complete delivery immediately
+3. HIGH: Finished products in QualityCheck → deliver to warehouse
+4. HIGH: P3 products in Conveyor_CQ upper_buffer → AGV_2 second processing
+5. HIGH: Raw materials available → start new production
+6. MEDIUM: AGV battery < 40% and idle → preventive charging
+
+AGV PAYLOAD HANDLING:
+- If AGV has payload and is at P8 (QualityCheck), load more finished products if available
+- If AGV has payload and is NOT at P9 (Warehouse), move to P9 first
+- If AGV has payload and is at P9, unload immediately
+- AGV with payload takes priority over empty AGV operations
 
 COMMAND VALIDATION RULES:
 - Generate only ONE command per request
@@ -130,12 +137,20 @@ REMEMBER: ONE COMMAND PER AGV - DIFFERENT AGVs CAN WORK SIMULTANEOUSLY!
         )
 
     async def generate_commands_for_available_agvs(
-        self, factory_state: Dict[str, Any]
+        self, factory_state: Dict[str, Any], reactive_event: Dict[str, Any] = None
     ) -> List[Dict[str, Any]]:
-        """Generate commands for available AGVs based on current factory state."""
+        """Generate commands for available AGVs based on current factory state and optional reactive event."""
 
-        # Create context for the agent
-        context = self._create_flow_context(factory_state)
+        # Log reactive event context for debugging
+        if reactive_event:
+            event_type = reactive_event.get("type", "unknown")
+            event_severity = reactive_event.get("severity", "medium")
+            logger.info(
+                f"Processing reactive event in ProductFlowAgent: {event_type} (severity: {event_severity})"
+            )
+
+        # Create context for the agent including reactive event info
+        context = self._create_flow_context(factory_state, reactive_event)
 
         # Log context for debugging
         logger.debug(f"Agent context length: {len(context)}")
@@ -195,7 +210,9 @@ REMEMBER: ONE COMMAND PER AGV - DIFFERENT AGVs CAN WORK SIMULTANEOUSLY!
             logger.error(f"Context length: {len(context) if context else 0}")
             return []
 
-    def _create_flow_context(self, factory_state: Dict[str, Any]) -> str:
+    def _create_flow_context(
+        self, factory_state: Dict[str, Any], reactive_event: Dict[str, Any] = None
+    ) -> str:
         """Create context for the product flow agent."""
 
         # Extract key information
@@ -209,14 +226,6 @@ REMEMBER: ONE COMMAND PER AGV - DIFFERENT AGVs CAN WORK SIMULTANEOUSLY!
             raw_material, stations, agvs, conveyors
         )
 
-        context_data = {
-            "line_id": self.line_id,
-            "timestamp": datetime.now().isoformat(),
-            "factory_state": factory_state,
-            "situation_analysis": analysis,
-            "ongoing_operations": self.ongoing_operations,
-        }
-
         # Create simplified summary
         agv_summary = []
         for agv_id in ["AGV_1", "AGV_2"]:
@@ -224,14 +233,19 @@ REMEMBER: ONE COMMAND PER AGV - DIFFERENT AGVs CAN WORK SIMULTANEOUSLY!
             status = agv_data.get("status", "unknown")
             battery = agv_data.get("battery_level", 0)
             point = agv_data.get("current_point", "unknown")
-            payload_count = len(agv_data.get("payload", []))
+            payload = agv_data.get("payload", [])
+            payload_count = len(payload)
 
-            # Determine availability
+            # Determine availability and include detailed payload info
             if status == "unknown" and battery == 0:
                 agv_summary.append(f"{agv_id}: AVAILABLE (startup)")
             elif status in ["idle", "moving"] and battery > 10:
+                payload_info = ""
+                if payload_count > 0:
+                    # Show specific product IDs in payload
+                    payload_info = f", carrying:[{','.join(payload)}]"
                 agv_summary.append(
-                    f"{agv_id}: AVAILABLE ({status}, {battery}%, @{point}, load:{payload_count})"
+                    f"{agv_id}: AVAILABLE ({status}, {battery}%, @{point}, load:{payload_count}{payload_info})"
                 )
             else:
                 agv_summary.append(f"{agv_id}: BUSY ({status}, {battery}%)")
@@ -272,6 +286,23 @@ REMEMBER: ONE COMMAND PER AGV - DIFFERENT AGVs CAN WORK SIMULTANEOUSLY!
             elif action["action"] == "deliver_finished_products":
                 finished_count = len(action.get("products", []))
                 action_summary.append(f"Finished products: {finished_count}")
+            elif action["action"] == "deliver_payload_to_warehouse":
+                agv_id = action.get("agv_id", "unknown")
+                payload_count = len(action.get("current_payload", []))
+                current_point = action.get("current_point", "unknown")
+                action_summary.append(
+                    f"{agv_id} payload delivery: {payload_count} items from {current_point}→P9"
+                )
+            elif action["action"] == "unload_at_warehouse":
+                agv_id = action.get("agv_id", "unknown")
+                payload_count = len(action.get("current_payload", []))
+                action_summary.append(f"{agv_id} unload at P9: {payload_count} items")
+            elif action["action"] == "load_more_finished_products":
+                agv_id = action.get("agv_id", "unknown")
+                payload_count = len(action.get("current_payload", []))
+                action_summary.append(
+                    f"{agv_id} at P8: load more (current: {payload_count})"
+                )
             elif action["action"] == "continue_p3_processing":
                 p3_count = len(action.get("p3_products", []))
                 action_summary.append(f"P3 2nd processing: {p3_count}")
@@ -318,9 +349,62 @@ REMEMBER: ONE COMMAND PER AGV - DIFFERENT AGVs CAN WORK SIMULTANEOUSLY!
                 f"CQ_buffers:upper({upper_count}),lower({lower_count})"
             )
 
+        # Build reactive event context if present
+        reactive_context = ""
+        if reactive_event:
+            event_type = reactive_event.get("type", "unknown")
+            event_severity = reactive_event.get("severity", "medium")
+            event_data = reactive_event.get("data", {})
+
+            # Create specific context based on event type
+            if event_type == "agv_loaded_idle":
+                agv_id = event_data.get("agv_id", "unknown")
+                payload_count = event_data.get("payload_count", 0)
+                current_point = event_data.get("current_point", "unknown")
+                reactive_context = f"""
+
+URGENT REACTIVE EVENT: {event_type} (severity: {event_severity})
+{agv_id} is idle with {payload_count} products at {current_point} - MUST complete delivery immediately!
+If at P8, can load more finished products. If not at P9, must move to P9. If at P9, must unload.
+"""
+            elif event_type == "finished_products_ready":
+                station_id = event_data.get("station_id", "unknown")
+                product_count = event_data.get("product_count", 0)
+                reactive_context = f"""
+
+REACTIVE EVENT: {event_type} (severity: {event_severity})
+{station_id} has {product_count} finished products ready for pickup - send available AGV to P8!
+"""
+            elif event_type == "agv_at_quality_check_ready":
+                agv_id = event_data.get("agv_id", "unknown")
+                current_point = event_data.get("current_point", "unknown")
+                battery_level = event_data.get("battery_level", 0)
+                reactive_context = f"""
+
+REACTIVE EVENT: {event_type} (severity: {event_severity})
+{agv_id} is idle at {current_point} with {battery_level}% battery - ready to load finished products!
+Check if QualityCheck has output_buffer products to load.
+"""
+            elif event_type == "agv_critical_battery":
+                agv_id = event_data.get("agv_id", "unknown")
+                battery_level = event_data.get("battery_level", 0)
+                current_point = event_data.get("current_point", "unknown")
+                reactive_context = f"""
+
+CRITICAL REACTIVE EVENT: {event_type} (severity: {event_severity})
+{agv_id} battery critically low ({battery_level}%) at {current_point} - MUST charge immediately!
+"""
+            else:
+                reactive_context = f"""
+
+REACTIVE EVENT: {event_type} (severity: {event_severity})
+EVENT DETAILS: {event_data}
+SPECIAL HANDLING: This is a reactive decision triggered by the above event - prioritize actions related to this event.
+"""
+
         return f"""
 LINE: {self.line_id},
-STATUS: {available_agv_count} AGVs available, {len(action_summary)} actions needed
+STATUS: {available_agv_count} AGVs available, {len(action_summary)} actions needed{reactive_context}
 
 AGVs: {" | ".join(agv_summary)}
 
@@ -337,10 +421,13 @@ DECISION LOGIC FOR THIS LINE:
 4. High: Raw materials → move to P0, then load specific product ID, then move to P1, then unload
 5. Medium: Position AGVs optimally
 
+CRITICAL FLOW: AGV idle with payload at P8 → move to P9 → unload finished products
+When AGV is at P8 and QualityCheck has output_buffer of finished P1/P2 products, AGV should load them immediately.
+
 IMPORTANT: When loading from P0 (RawMaterial), specify the exact product_id in load command
 Example: [{{"command_id":"cmd_123","action":"load","target":"AGV_1","params":{{"product_id":"prod_1_abc123"}}}}]
 
-RESPOND JSON ONLY: [] or [{{"command_id":"cmd_123","action":"move","target":"AGV_X","params":{{"target_point":"P0"}}}}]
+RESPOND with the JSON Block First and then an explanation after to detail the reasoning for the command: [] or [{{"command_id":"cmd_123","action":"move","target":"AGV_X","params":{{"target_point":"P0"}}}}]
 """
 
     def _analyze_factory_situation(
@@ -381,7 +468,6 @@ RESPOND JSON ONLY: [] or [{{"command_id":"cmd_123","action":"move","target":"AGV
         p3_products_lower = [
             p for p in lower_buffer if isinstance(p, str) and "prod_3" in p
         ]
-        total_p3_products = p3_products_upper + p3_products_lower
 
         # P3 products in upper_buffer need AGV_2 for second processing
         if len(p3_products_upper) > 0:
@@ -460,12 +546,51 @@ RESPOND JSON ONLY: [] or [{{"command_id":"cmd_123","action":"move","target":"AGV
                     }
                 )
 
-        # Check AGV status for battery management
+        # Check AGV status for payload delivery and battery management (HIGHEST PRIORITY for loaded AGVs)
         for agv_id, agv_data in agvs.items():
             battery = agv_data.get("battery_level", 100)
             status = agv_data.get("status", "unknown")
             payload = agv_data.get("payload", [])
             current_point = agv_data.get("current_point", "unknown")
+
+            # HIGHEST PRIORITY: AGV with payload needs to complete delivery
+            if len(payload) > 0:
+                if current_point == "P8" and status == "idle":
+                    # AGV at QualityCheck with payload - can load more finished products if available
+                    analysis["actions_needed"].append(
+                        {
+                            "action": "load_more_finished_products",
+                            "priority": "high",
+                            "details": f"{agv_id} at P8 with payload {payload} - can load more finished products",
+                            "agv_id": agv_id,
+                            "current_payload": payload,
+                            "current_point": current_point,
+                        }
+                    )
+                elif current_point != "P9" and status in ["idle", "moving"]:
+                    # AGV with payload not at warehouse - must move to P9
+                    analysis["actions_needed"].append(
+                        {
+                            "action": "deliver_payload_to_warehouse",
+                            "priority": "high",
+                            "details": f"{agv_id} has payload {payload} at {current_point} - must deliver to P9",
+                            "agv_id": agv_id,
+                            "current_payload": payload,
+                            "current_point": current_point,
+                        }
+                    )
+                elif current_point == "P9" and status == "idle":
+                    # AGV at warehouse with payload - must unload
+                    analysis["actions_needed"].append(
+                        {
+                            "action": "unload_at_warehouse",
+                            "priority": "high",
+                            "details": f"{agv_id} at P9 with payload {payload} - must unload",
+                            "agv_id": agv_id,
+                            "current_payload": payload,
+                            "current_point": current_point,
+                        }
+                    )
 
             if battery < 20 and status != "charging":
                 analysis["actions_needed"].append(
