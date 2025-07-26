@@ -33,7 +33,7 @@ class SharedOrderManager:
             self._assignment_lock = threading.Lock()
             self._processed_orders = set()
             self._line_assignment_counter = 0
-            self._available_lines = ["line1"]  # Only line1 for testing
+            self._available_lines = ["line1", "line2", "line3"]  # All production lines
             self._initialized = True
             logger.info("SharedOrderManager initialized")
 

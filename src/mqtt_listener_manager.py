@@ -7,6 +7,7 @@ Separates MQTT communication logic from agent decision making.
 
 import json
 import logging
+import os
 from datetime import datetime
 from typing import Any, Callable, Dict, List
 
@@ -20,7 +21,13 @@ logger = logging.getLogger(__name__)
 class MQTTListenerManager:
     """Manages all MQTT subscriptions and message routing for factory monitoring."""
 
-    def __init__(self, line_id: str, topic_root: str = "AgenticFactoria"):
+    def __init__(
+        self,
+        line_id: str,
+        topic_root: str = os.getenv(
+            "TOPIC_ROOT", os.getenv("USERNAME", os.getenv("USER", "NLDF_TEST"))
+        ),
+    ):
         self.line_id = line_id
         self.topic_root = topic_root
 
@@ -28,7 +35,7 @@ class MQTTListenerManager:
         self.mqtt_client = MQTTClient(
             host=MQTT_BROKER_HOST,
             port=MQTT_BROKER_PORT,
-            client_id=f"mqtt_listener_{line_id}",
+            client_id=f"mqtt_listener_{line_id}_{datetime.now().timestamp()}",
         )
 
         # Topic manager

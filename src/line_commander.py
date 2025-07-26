@@ -8,6 +8,7 @@ and coordinates AGV operations for a production line.
 import asyncio
 import json
 import logging
+import os
 from datetime import datetime
 from typing import Any, Dict, List
 
@@ -126,8 +127,6 @@ Always respond with JSON array of commands:
     "action": "move|load|unload|charge",
     "target": "AGV_1|AGV_2",
     "params": {{"target_point": "P1", "product_id": "prod_...", "target_level": 80.0}},
-    "priority": "critical|high|medium|low",
-    "reasoning": "Brief explanation of why this command is needed"
   }}
 ]
 
@@ -143,7 +142,7 @@ STRATEGIC THINKING:
         return Agent(
             name=f"LineCommander_{self.line_id}",
             instructions=instructions,
-            model="gpt-4.1-mini",
+            model=os.getenv("model", "gpt-4.1-mini"),
         )
 
     def _register_mqtt_handlers(self):
@@ -265,9 +264,10 @@ STRATEGIC THINKING:
     def _handle_conveyor_status(self, conveyor_id: str, data: Dict[str, Any]):
         """Handle conveyor status updates."""
         status = data.get("status", "unknown")
-        buffer_count = len(data.get("buffer", []))
-        upper_buffer_count = len(data.get("upper_buffer", []))
-        lower_buffer_count = len(data.get("lower_buffer", []))
+        # Safe length checking for potentially None buffers
+        buffer_count = len(data.get("buffer") or [])
+        upper_buffer_count = len(data.get("upper_buffer") or [])
+        lower_buffer_count = len(data.get("lower_buffer") or [])
 
         if status == "blocked" or buffer_count > 5:
             self._queue_decision_event(
@@ -654,32 +654,3 @@ Respond with JSON array of commands only. Maximum 3 commands for focused respons
         self.is_running = False
         self.mqtt_listener.stop()
         logger.info(f"Line Commander {self.line_id} stopped")
-
-
-async def main():
-    """Main function to run the line commander."""
-    import os
-
-    from dotenv import load_dotenv
-
-    load_dotenv()
-
-    # Check if API key is set
-    if not os.getenv("OPENAI_API_KEY"):
-        logger.error("OPENAI_API_KEY not set. Please set your OpenAI API key.")
-        return
-
-    # Create and start line commander
-    line_commander = LineCommander(line_id="line1", max_orders_per_cycle=2)
-
-    try:
-        await line_commander.start_command_operations()
-    except KeyboardInterrupt:
-        logger.info("Received interrupt signal")
-    finally:
-        line_commander.stop()
-
-
-if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
-    asyncio.run(main())

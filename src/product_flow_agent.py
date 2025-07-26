@@ -7,6 +7,7 @@ optimal AGV commands based on the successful product flow pattern.
 
 import json
 import logging
+import os
 from datetime import datetime
 from typing import Any, Dict, List
 
@@ -99,7 +100,7 @@ COMMAND GENERATION RULES:
 - Balance workload between available AGVs (except P3 second processing)
 
 RESPONSE FORMAT:
-Generate JSON array of commands with clear reasoning:
+Generate JSON array of commands:
 [
   {{
     "command_id": "flow_timestamp_action",
@@ -120,7 +121,7 @@ OPTIMIZATION PRINCIPLES:
         return Agent(
             name=f"ProductFlowAgent_{self.line_id}",
             instructions=instructions,
-            model="gpt-4.1-mini",
+            model=os.getenv("model", "gpt-4.1-mini"),
         )
 
     async def generate_flow_commands(
@@ -194,7 +195,7 @@ Focus on:
 4. Managing AGV battery levels
 5. Avoiding command conflicts
 
-Generate JSON array of commands with clear reasoning for each action.
+Generate JSON array of commands.
 """
 
     def _analyze_factory_situation(
@@ -532,36 +533,24 @@ Generate JSON array of commands with clear reasoning for each action.
                     "action": "move",
                     "target": agv_id,
                     "params": {"target_point": "P0"},
-                    "priority": "high",
-                    "reasoning": f"P3 product {product_id}: Move to RawMaterial for pickup",
-                    "flow_stage": "p3_raw_pickup",
                 },
                 {
                     "command_id": f"p3_start_{timestamp}_load_raw",
                     "action": "load",
                     "target": agv_id,
                     "params": {"product_id": product_id},
-                    "priority": "high",
-                    "reasoning": f"P3 product {product_id}: Load from RawMaterial",
-                    "flow_stage": "p3_raw_pickup",
                 },
                 {
                     "command_id": f"p3_start_{timestamp}_move_to_station_a",
                     "action": "move",
                     "target": agv_id,
                     "params": {"target_point": "P1"},
-                    "priority": "high",
-                    "reasoning": f"P3 product {product_id}: Move to StationA for first processing",
-                    "flow_stage": "p3_station_delivery",
                 },
                 {
                     "command_id": f"p3_start_{timestamp}_unload_station_a",
                     "action": "unload",
                     "target": agv_id,
                     "params": {},
-                    "priority": "high",
-                    "reasoning": f"P3 product {product_id}: Unload at StationA for first processing cycle",
-                    "flow_stage": "p3_station_delivery",
                 },
             ]
 
@@ -579,36 +568,24 @@ Generate JSON array of commands with clear reasoning for each action.
                     "action": "move",
                     "target": "AGV_2",  # Force AGV_2 for P3 second processing
                     "params": {"target_point": "P6"},
-                    "priority": "high",
-                    "reasoning": f"P3 product {product_id}: AGV_2 move to Conveyor_CQ upper_buffer (only AGV_2 can access)",
-                    "flow_stage": "p3_second_pickup",
                 },
                 {
                     "command_id": f"p3_continue_{timestamp}_load_conveyor_cq",
                     "action": "load",
                     "target": "AGV_2",  # Force AGV_2 for P3 second processing
                     "params": {"product_id": product_id},
-                    "priority": "high",
-                    "reasoning": f"P3 product {product_id}: AGV_2 load from Conveyor_CQ upper_buffer",
-                    "flow_stage": "p3_second_pickup",
                 },
                 {
                     "command_id": f"p3_continue_{timestamp}_move_to_station_b",
                     "action": "move",
                     "target": "AGV_2",  # Force AGV_2 for P3 second processing
                     "params": {"target_point": "P3"},
-                    "priority": "high",
-                    "reasoning": f"P3 product {product_id}: AGV_2 move to StationB for second processing cycle",
-                    "flow_stage": "p3_second_delivery",
                 },
                 {
                     "command_id": f"p3_continue_{timestamp}_unload_station_b",
                     "action": "unload",
                     "target": "AGV_2",  # Force AGV_2 for P3 second processing
                     "params": {},
-                    "priority": "high",
-                    "reasoning": f"P3 product {product_id}: AGV_2 unload at StationB for second processing cycle",
-                    "flow_stage": "p3_second_delivery",
                 },
             ]
 
@@ -620,36 +597,24 @@ Generate JSON array of commands with clear reasoning for each action.
                     "action": "move",
                     "target": agv_id,
                     "params": {"target_point": "P8"},
-                    "priority": "high",
-                    "reasoning": f"P3 product {product_id}: Move to QualityCheck for finished product pickup",
-                    "flow_stage": "p3_quality_pickup",
                 },
                 {
                     "command_id": f"p3_finish_{timestamp}_load_quality",
                     "action": "load",
                     "target": agv_id,
                     "params": {"product_id": product_id},
-                    "priority": "high",
-                    "reasoning": f"P3 product {product_id}: Load finished product from QualityCheck",
-                    "flow_stage": "p3_quality_pickup",
                 },
                 {
                     "command_id": f"p3_finish_{timestamp}_move_to_warehouse",
                     "action": "move",
                     "target": agv_id,
                     "params": {"target_point": "P9"},
-                    "priority": "high",
-                    "reasoning": f"P3 product {product_id}: Move to Warehouse for final delivery",
-                    "flow_stage": "p3_warehouse_delivery",
                 },
                 {
                     "command_id": f"p3_finish_{timestamp}_unload_warehouse",
                     "action": "unload",
                     "target": agv_id,
                     "params": {},
-                    "priority": "high",
-                    "reasoning": f"P3 product {product_id}: Unload finished product at Warehouse",
-                    "flow_stage": "p3_warehouse_delivery",
                 },
             ]
 
@@ -670,36 +635,24 @@ Generate JSON array of commands with clear reasoning for each action.
                     "action": "move",
                     "target": agv_id,
                     "params": {"target_point": "P0"},
-                    "priority": "high",
-                    "reasoning": f"P1/P2 product {product_id}: Move to RawMaterial for pickup",
-                    "flow_stage": "raw_pickup",
                 },
                 {
                     "command_id": f"p1_p2_start_{timestamp}_load_raw",
                     "action": "load",
                     "target": agv_id,
                     "params": {"product_id": product_id},
-                    "priority": "high",
-                    "reasoning": f"P1/P2 product {product_id}: Load from RawMaterial",
-                    "flow_stage": "raw_pickup",
                 },
                 {
                     "command_id": f"p1_p2_start_{timestamp}_move_to_station_a",
                     "action": "move",
                     "target": agv_id,
                     "params": {"target_point": "P1"},
-                    "priority": "high",
-                    "reasoning": f"P1/P2 product {product_id}: Move to StationA for processing",
-                    "flow_stage": "station_delivery",
                 },
                 {
                     "command_id": f"p1_p2_start_{timestamp}_unload_station_a",
                     "action": "unload",
                     "target": agv_id,
                     "params": {},
-                    "priority": "high",
-                    "reasoning": f"P1/P2 product {product_id}: Unload at StationA for processing",
-                    "flow_stage": "station_delivery",
                 },
             ]
 
@@ -711,36 +664,24 @@ Generate JSON array of commands with clear reasoning for each action.
                     "action": "move",
                     "target": agv_id,
                     "params": {"target_point": "P8"},
-                    "priority": "high",
-                    "reasoning": f"P1/P2 product {product_id}: Move to QualityCheck for finished product pickup",
-                    "flow_stage": "quality_pickup",
                 },
                 {
                     "command_id": f"p1_p2_finish_{timestamp}_load_quality",
                     "action": "load",
                     "target": agv_id,
                     "params": {"product_id": product_id},
-                    "priority": "high",
-                    "reasoning": f"P1/P2 product {product_id}: Load finished product from QualityCheck",
-                    "flow_stage": "quality_pickup",
                 },
                 {
                     "command_id": f"p1_p2_finish_{timestamp}_move_to_warehouse",
                     "action": "move",
                     "target": agv_id,
                     "params": {"target_point": "P9"},
-                    "priority": "high",
-                    "reasoning": f"P1/P2 product {product_id}: Move to Warehouse for final delivery",
-                    "flow_stage": "warehouse_delivery",
                 },
                 {
                     "command_id": f"p1_p2_finish_{timestamp}_unload_warehouse",
                     "action": "unload",
                     "target": agv_id,
                     "params": {},
-                    "priority": "high",
-                    "reasoning": f"P1/P2 product {product_id}: Unload finished product at Warehouse",
-                    "flow_stage": "warehouse_delivery",
                 },
             ]
 
