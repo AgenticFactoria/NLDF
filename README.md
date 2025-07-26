@@ -11,6 +11,9 @@ The NLDF project represents a cutting-edge fusion of artificial intelligence and
 
 Context and Background of the project: https://ofra65wfwe.feishu.cn/wiki/SRgrwj9LWimsTikRFdzcVvlDnEU
 
+Agentic Chain-of-Thought Display:
+https://www.agenticfactoria.work/
+
 ## 🚀 Key Features
 
 - **AI-Driven Decision Making**: OpenAI Agent SDK powers intelligent production line management
