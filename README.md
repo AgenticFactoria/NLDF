@@ -4,17 +4,11 @@
 
 This project implements a modular factory automation system with separated concerns:
 
-### New Modular Architecture (Recommended)
-
 - **MQTT Listener Manager** (`src/mqtt_listener_manager.py`): Handles all MQTT subscriptions and maintains factory state
 - **Line Commander** (`src/line_commander.py`): Central decision-making component that coordinates AGV operations
 - **Product Flow Agent** (`src/product_flow_agent.py`): Specialized AI agent that understands complete product workflow
 - **Order MQTT Handler** (`src/order_mqtt_handler.py`): Processes order-related messages
 - **Main Entry Point** (`main_line_commander.py`): Runs the new modular system
-
-### Legacy Architecture
-
-- **Factory Agent Manager** (`src/factory_agent_manager.py`): Original monolithic implementation
 
 ## Quick Start
 
@@ -93,12 +87,7 @@ Monitor all production lines in real-time:
 uv run monitor_dashboard.py
 ```
 
-#### Legacy System
-
-```bash
-# Run the original factory agent manager
-uv run main_factory_system.py
-```
+````
 
 ### 4. Unity Run
 
@@ -239,7 +228,7 @@ The new system manages all 3 production lines simultaneously:
   { "action": "move", "target": "AGV_1", "params": { "target_point": "P9" } },
   { "action": "unload", "target": "AGV_1", "params": {} }
 ]
-```
+````
 
 #### Key Insights:
 
