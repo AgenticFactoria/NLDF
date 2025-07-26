@@ -452,4 +452,7 @@ class LineCommander:
         """Stop the line commander."""
         self.is_running = False
         self.mqtt_listener.stop()
+        # Cleanup the product flow agent MQTT connection
+        if hasattr(self, "product_flow_agent"):
+            self.product_flow_agent.cleanup()
         logger.info(f"Line Commander {self.line_id} stopped")

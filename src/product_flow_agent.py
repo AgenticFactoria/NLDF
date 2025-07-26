@@ -12,6 +12,8 @@ from typing import Any, Dict, List
 
 from agents import Agent, Runner, SQLiteSession
 from shared_order_manager import SharedOrderManager
+from src.config.settings import MQTT_BROKER_HOST, MQTT_BROKER_PORT
+from src.utils.mqtt_client import MQTTClient
 
 logger = logging.getLogger(__name__)
 
@@ -33,6 +35,21 @@ class ProductFlowAgent:
             "quality_check_delivery": {},  # agv_id -> product_id
             "agv_charging": [],  # agv_ids currently charging (list for JSON serialization)
         }
+
+        # Initialize MQTT client for publishing agent input/output
+        self.mqtt_client = MQTTClient(
+            host=MQTT_BROKER_HOST,
+            port=MQTT_BROKER_PORT,
+            client_id=f"product_flow_agent_{line_id}_agent",
+        )
+        try:
+            self.mqtt_client.connect()
+            logger.info(f"MQTT client connected for ProductFlowAgent {line_id}")
+        except Exception as e:
+            logger.error(
+                f"Failed to connect MQTT client for ProductFlowAgent {line_id}: {e}"
+            )
+            self.mqtt_client = None
 
     def _create_product_flow_agent(self) -> Agent:
         """Create the specialized product flow agent."""
@@ -136,6 +153,37 @@ REMEMBER: ONE COMMAND PER AGV - DIFFERENT AGVs CAN WORK SIMULTANEOUSLY!
             model=os.getenv("model", "gpt-4.1-mini"),
         )
 
+    def _publish_agent_message(
+        self,
+        input_context: str,
+        agent_result,
+    ):
+        """Publish agent input and raw result to MQTT topic yangzhi/line1/agent/output/message"""
+        if not self.mqtt_client or not self.mqtt_client.is_connected():
+            logger.warning("MQTT client not available for publishing agent message")
+            return
+
+        try:
+            # Extract the raw agent output
+            raw_output = ""
+            if agent_result and hasattr(agent_result, "final_output"):
+                raw_output = str(agent_result.final_output)
+
+            # Create the message payload with raw agent result
+            message_payload = {
+                "input": input_context,
+                "raw_output": raw_output,
+            }
+
+            # Publish to the specified topic
+            topic_root = os.getenv("MQTT_TOPIC_ROOT", "yangzhi")
+            topic = f"{topic_root}/{self.line_id}/agent/output/message"
+            self.mqtt_client.publish(topic, json.dumps(message_payload, indent=2))
+            logger.info(f"Published agent input/output to {topic}")
+
+        except Exception as e:
+            logger.error(f"Failed to publish agent message to MQTT: {e}")
+
     async def generate_commands_for_available_agvs(
         self, factory_state: Dict[str, Any], reactive_event: Dict[str, Any] = None
     ) -> List[Dict[str, Any]]:
@@ -165,7 +213,6 @@ REMEMBER: ONE COMMAND PER AGV - DIFFERENT AGVs CAN WORK SIMULTANEOUSLY!
                 logger.warning("Agent returned no result or invalid result structure")
                 logger.warning(f"Result type: {type(result)}")
                 logger.warning(f"Result content: {result}")
-                return []
 
             # Log the raw AI output for debugging
             logger.info(f"Raw AI output: '{result.final_output}'")
@@ -176,6 +223,9 @@ REMEMBER: ONE COMMAND PER AGV - DIFFERENT AGVs CAN WORK SIMULTANEOUSLY!
 
             # Parse commands (can be single command or list)
             commands = self._parse_agent_output(result.final_output)
+
+            # Publish agent input and output to MQTT
+            self._publish_agent_message(context, result)
 
             if commands:
                 # Update ongoing operations tracking
@@ -964,3 +1014,18 @@ RESPOND with the JSON Block First and then an explanation after to detail the re
                 f"AGV_2 not available for P3 second processing (status: {agv_2_status}, battery: {agv_2_battery}%)"
             )
             return None
+
+    def cleanup(self):
+        """Clean up resources, including MQTT connection."""
+        if self.mqtt_client and self.mqtt_client.is_connected():
+            try:
+                self.mqtt_client.disconnect()
+                logger.info(
+                    f"MQTT client disconnected for ProductFlowAgent {self.line_id}"
+                )
+            except Exception as e:
+                logger.error(f"Error disconnecting MQTT client: {e}")
+
+    def __del__(self):
+        """Destructor to ensure cleanup."""
+        self.cleanup()
