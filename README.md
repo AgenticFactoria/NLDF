@@ -96,7 +96,7 @@ uv run monitor_dashboard.py
 
    "wss":{
    "port": 8084,
-   "host": "ec2-13-212-179-9.ap-southeast-1.compute.amazonaws.com",
+   "host": "supos-ce-instance4.supos.app",
    "client*id": "\*\*\_NLDF2_mqtt_wss_test*\*\*",
    ......
    },

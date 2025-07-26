@@ -168,13 +168,7 @@ REMEMBER: ONE COMMAND PER AGV - DIFFERENT AGVs CAN WORK SIMULTANEOUSLY!
                 logger.info(f"Generated {len(commands)} commands for available AGVs")
                 return commands
             else:
-                logger.info("No commands generated - checking if fallback is needed")
-                # Check if we should generate a simple fallback command
-                fallback_command = self._generate_fallback_command(factory_state)
-                if fallback_command:
-                    logger.info(f"Generated fallback command: {fallback_command}")
-                    return [fallback_command]
-
+                logger.info("No commands generated - no action needed for this line")
                 # Log factory state summary to help debug why no commands were generated
                 agvs = factory_state.get("agvs", {})
                 warehouse = factory_state.get("warehouse", {})
@@ -590,61 +584,6 @@ RESPOND JSON ONLY: [] or [{{"command_id":"cmd_123","action":"move","target":"AGV
             # Fallback: distribute products by line index
             line_index = int(self.line_id[-1]) - 1
             return [p for i, p in enumerate(all_raw_products) if i % 3 == line_index]
-
-    def _generate_fallback_command(
-        self, factory_state: Dict[str, Any]
-    ) -> Dict[str, Any]:
-        """Generate a simple fallback command when AI fails to generate commands but action is clearly needed."""
-        agvs = factory_state.get("agvs", {})
-        warehouse = factory_state.get("warehouse", {})
-        stations = factory_state.get("stations", {})
-
-        # Find an available AGV
-        available_agv = None
-        for agv_id in ["AGV_1", "AGV_2"]:
-            agv_data = agvs.get(agv_id, {})
-            status = agv_data.get("status", "unknown")
-            battery = agv_data.get("battery_level", 0)
-
-            # Consider AGV available if unknown status (startup) or idle with good battery
-            if (status == "unknown" and battery == 0) or (
-                status == "idle" and battery > 20
-            ):
-                available_agv = agv_id
-                break
-
-        if not available_agv:
-            return {}
-
-        # Check for raw materials to start production
-        raw_products = warehouse.get("buffer", [])
-        if raw_products:
-            # Get products assigned to this line
-            line_assigned_products = self._get_line_assigned_raw_products(raw_products)
-            if line_assigned_products:
-                first_product = line_assigned_products[0]
-                timestamp = datetime.now().timestamp()
-                return {
-                    "command_id": f"fallback_{self.line_id}_{timestamp}",
-                    "action": "move",
-                    "target": available_agv,
-                    "params": {"target_point": "P0"},
-                    "next_load_product": first_product,  # Include product ID for next load command
-                }
-
-        # Check for finished products to deliver
-        quality_check = stations.get("QualityCheck", {})
-        finished_products = quality_check.get("output_buffer", [])
-        if finished_products:
-            timestamp = datetime.now().timestamp()
-            return {
-                "command_id": f"fallback_{timestamp}",
-                "action": "move",
-                "target": available_agv,
-                "params": {"target_point": "P8"},
-            }
-
-        return {}
 
     def _get_available_agvs_info(self, agvs: Dict[str, Any]) -> str:
         """Get information about which AGVs are available for commands."""
