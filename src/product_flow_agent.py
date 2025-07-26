@@ -38,84 +38,68 @@ class ProductFlowAgent:
         instructions = f"""
 You are a Product Flow Specialist for production line {self.line_id}.
 
-EXPERTISE: You understand the complete product workflow and generate optimal AGV commands.
+🚨 CRITICAL COMMAND SEQUENCE RULE 🚨
+EVERY AGV OPERATION MUST FOLLOW THIS EXACT 4-STEP SEQUENCE:
+1. MOVE to target location FIRST
+2. LOAD/UNLOAD at that location
+3. MOVE to next location
+4. LOAD/UNLOAD at next location
 
-SUCCESSFUL PRODUCT FLOW (P1/P2):
-1. AGV → P0 (RawMaterial) → load specific product_id
-2. AGV → P1 (StationA) → unload (automatic processing starts)
-3. [AUTOMATIC] StationA → Conveyor_AB → StationB → Conveyor_BC → StationC → Conveyor_CQ → QualityCheck
-4. AGV → P8 (QualityCheck) → load finished product
-5. AGV → P9 (Warehouse) → unload finished product
+❌ NEVER send load/unload commands without MOVE commands first!
+❌ NEVER assume AGV is already at the right location!
 
-PRODUCT FLOW (P3 - Double Processing):
-1. AGV → P0 (RawMaterial) → load specific product_id (e.g., 'prod_3_75a16c3d')
-2. AGV → P1 (StationA) → unload
-3. [AUTOMATIC] StationA → Conveyor_AB → StationB → Conveyor_BC → StationC → Conveyor_CQ (upper_buffer)
-4. **CRITICAL**: Only AGV_2 can access Conveyor_CQ upper_buffer at P6!
-5. AGV_2 → P6 (Conveyor_CQ) → load same product_id from upper_buffer
-6. AGV_2 → P3 (StationB) → unload (second processing cycle)
-7. [AUTOMATIC] StationB → Conveyor_BC → StationC → Conveyor_CQ → QualityCheck
-8. AGV → P8 (QualityCheck) → load same product_id (finished product)
-9. AGV → P9 (Warehouse) → unload finished product
+MANDATORY COMMAND SEQUENCES:
 
-AGV BUFFER ACCESS RESTRICTIONS:
-- AGV_1 at P6: Can only access Conveyor_CQ lower_buffer
-- AGV_2 at P6: Can only access Conveyor_CQ upper_buffer
-- P3 products after first processing go to upper_buffer
-- Therefore: ONLY AGV_2 can handle P3 second processing!
+🔄 START PRODUCTION (RawMaterial → StationA):
+1. {{"action": "move", "target": "AGV_X", "params": {{"target_point": "P0"}}}}
+2. {{"action": "load", "target": "AGV_X", "params": {{"product_id": "prod_X_XXXXX"}}}}
+3. {{"action": "move", "target": "AGV_X", "params": {{"target_point": "P1"}}}}
+4. {{"action": "unload", "target": "AGV_X", "params": {{}}}}
 
-EXACT P3 COMMAND SEQUENCE (Based on Real Factory Data):
-Stage 1 (Any AGV): RawMaterial → StationA
-Stage 2 (ONLY AGV_2): Conveyor_CQ upper_buffer → StationB  
-Stage 3 (Any AGV): QualityCheck → Warehouse
+🔄 FINISH PRODUCTION (QualityCheck → Warehouse):
+1. {{"action": "move", "target": "AGV_X", "params": {{"target_point": "P8"}}}}
+2. {{"action": "load", "target": "AGV_X", "params": {{}}}}
+3. {{"action": "move", "target": "AGV_X", "params": {{"target_point": "P9"}}}}
+4. {{"action": "unload", "target": "AGV_X", "params": {{}}}}
 
-KEY INSIGHTS:
-- AGV only needed for: RawMaterial→StationA, QualityCheck→Warehouse, (P3: Conveyor_CQ→StationB)
-- Stations and conveyors handle processing automatically
-- Monitor RawMaterial buffer for new products to start
-- Monitor QualityCheck output_buffer for finished products
-- Battery management: charge when < 30%, target 80%
+🔄 P3 SECOND PROCESSING (Conveyor_CQ → StationB) - ONLY AGV_2:
+1. {{"action": "move", "target": "AGV_2", "params": {{"target_point": "P6"}}}}
+2. {{"action": "load", "target": "AGV_2", "params": {{"product_id": "prod_3_XXXXX"}}}}
+3. {{"action": "move", "target": "AGV_2", "params": {{"target_point": "P3"}}}}
+4. {{"action": "unload", "target": "AGV_2", "params": {{}}}}
 
-DECISION LOGIC:
-1. HIGH PRIORITY: Finished products in QualityCheck output_buffer (deliver to warehouse)
-2. HIGH PRIORITY: P3 products in Conveyor_CQ upper/lower buffer (continue double processing - critical for P3 flow)
-3. HIGH PRIORITY: Raw materials available + idle AGV (start new production)
-4. MEDIUM PRIORITY: AGV battery < 40% and idle (preventive charging)
-5. CRITICAL: AGV battery < 20% (emergency charging)
+FACTORY WORKFLOW:
+P0: RawMaterial → P1: StationA → [AUTO: P2→P3→P4→P5→P6→P7] → P8: QualityCheck → P9: Warehouse
 
-P3 PROCESSING STAGES:
-- Stage 1: RawMaterial → StationA (same as P1/P2)
-- Stage 2: Conveyor_CQ upper/lower buffer → StationB (P3 specific second processing)
-- Stage 3: QualityCheck → Warehouse (same as P1/P2)
+PRODUCT TYPES:
+- P1/P2: Single pass (RawMaterial→StationA→[AUTO]→QualityCheck→Warehouse)
+- P3: Double pass (RawMaterial→StationA→[AUTO]→Conveyor_CQ→StationB→[AUTO]→QualityCheck→Warehouse)
 
-IMPORTANT: P3 products MUST be picked up from Conveyor_CQ upper_buffer and delivered to StationB for second processing cycle!
+P3 SPECIAL RULE: Only AGV_2 can access Conveyor_CQ upper_buffer at P6!
 
-COMMAND GENERATION RULES:
-- Always specify product_id when loading from RawMaterial
-- Use auto-detection when loading from QualityCheck (don't specify product_id)
-- **CRITICAL P3 RULE**: Only AGV_2 can load P3 products from Conveyor_CQ upper_buffer at P6
-- AGV_1 can only access Conveyor_CQ lower_buffer at P6 (not used for P3)
-- P3 second processing MUST use AGV_2 for Conveyor_CQ → StationB transport
-- Avoid command conflicts: don't send multiple AGVs to same location simultaneously
-- Balance workload between available AGVs (except P3 second processing)
+DECISION PRIORITIES:
+1. CRITICAL: AGV battery < 20% → charge immediately
+2. HIGH: Finished products in QualityCheck → deliver to warehouse
+3. HIGH: P3 products in Conveyor_CQ upper_buffer → AGV_2 second processing
+4. HIGH: Raw materials available → start new production
+5. MEDIUM: AGV battery < 40% and idle → preventive charging
 
-RESPONSE FORMAT:
-Generate JSON array of commands:
+COMMAND VALIDATION CHECKLIST:
+✅ Every sequence starts with MOVE command
+✅ Load from RawMaterial specifies product_id
+✅ Load from QualityCheck uses empty params {{}}
+✅ P3 second processing uses AGV_2 only
+✅ No duplicate AGV assignments in same sequence
+
+RESPONSE FORMAT - ALWAYS JSON ARRAY:
 [
-  {{
-    "command_id": "flow_timestamp_action",
-    "action": "move|load|unload|charge",
-    "target": "AGV_1|AGV_2",
-    "params": {{"target_point": "P0", "product_id": "prod_1_abc123", "target_level": 80.0}},
-  }}
+  {{"command_id": "flow_timestamp_description", "action": "move", "target": "AGV_1", "params": {{"target_point": "P0"}}}},
+  {{"command_id": "flow_timestamp_description", "action": "load", "target": "AGV_1", "params": {{"product_id": "prod_1_abc123"}}}},
+  {{"command_id": "flow_timestamp_description", "action": "move", "target": "AGV_1", "params": {{"target_point": "P1"}}}},
+  {{"command_id": "flow_timestamp_description", "action": "unload", "target": "AGV_1", "params": {{}}}}
 ]
 
-OPTIMIZATION PRINCIPLES:
-- Maximize throughput by keeping production flowing
-- Minimize AGV idle time
-- Ensure products don't wait unnecessarily
-- Balance AGV battery levels
-- Prioritize order completion
+🚨 REMEMBER: MOVE FIRST, THEN LOAD/UNLOAD! 🚨
 """
 
         return Agent(
@@ -186,16 +170,21 @@ SITUATION ANALYSIS:
 IMMEDIATE ACTIONS NEEDED:
 {json.dumps(analysis["actions_needed"], indent=2)}
 
-TASK: Based on the product flow logic and current factory state, generate optimal AGV commands.
+🚨 CRITICAL TASK: Generate optimal AGV commands following MANDATORY SEQUENCE RULES 🚨
 
-Focus on:
-1. Completing any urgent deliveries (QualityCheck → Warehouse)
-2. Starting new production (RawMaterial → StationA) 
-3. Continuing P3 double processing (Conveyor_CQ → StationB)
+SEQUENCE REQUIREMENTS:
+1. EVERY command sequence MUST start with MOVE
+2. NEVER send load/unload without moving to location first
+3. Follow the 4-step pattern: MOVE → LOAD/UNLOAD → MOVE → LOAD/UNLOAD
+
+PRIORITY ACTIONS:
+1. Completing urgent deliveries (QualityCheck → Warehouse) - MOVE to P8 first!
+2. Starting new production (RawMaterial → StationA) - MOVE to P0 first!
+3. Continuing P3 double processing (Conveyor_CQ → StationB) - MOVE to P6 first!
 4. Managing AGV battery levels
 5. Avoiding command conflicts
 
-Generate JSON array of commands.
+🚨 GENERATE JSON ARRAY WITH PROPER MOVE-FIRST SEQUENCES! 🚨
 """
 
     def _analyze_factory_situation(
@@ -459,16 +448,6 @@ Generate JSON array of commands.
                         "finished_product"
                     )
 
-    def clear_operation(self, agv_id: str, operation_type: str):
-        """Clear completed operation from tracking."""
-        if operation_type == "charging":
-            if agv_id in self.ongoing_operations["agv_charging"]:
-                self.ongoing_operations["agv_charging"].remove(agv_id)
-        elif operation_type == "raw_pickup":
-            self.ongoing_operations["raw_material_pickup"].pop(agv_id, None)
-        elif operation_type == "quality_delivery":
-            self.ongoing_operations["quality_check_delivery"].pop(agv_id, None)
-
     def _select_agv_for_p3_second_processing(self, agvs: Dict[str, Any]) -> str:
         """Select AGV for P3 second processing. MUST be AGV_2 due to upper_buffer access."""
         agv_2_data = agvs.get("AGV_2", {})
@@ -490,199 +469,3 @@ Generate JSON array of commands.
                 f"AGV_2 not available for P3 second processing (status: {agv_2_status}, battery: {agv_2_battery}%)"
             )
             return None
-
-    def _select_best_available_agv(
-        self, agvs: Dict[str, Any], exclude_agvs: List[str] = None
-    ) -> str:
-        """Select the best available AGV for general tasks."""
-        if exclude_agvs is None:
-            exclude_agvs = []
-
-        available_agvs = []
-
-        for agv_id in ["AGV_1", "AGV_2"]:
-            if agv_id in exclude_agvs:
-                continue
-
-            agv_data = agvs.get(agv_id, {})
-            status = agv_data.get("status", "unknown")
-            battery = agv_data.get("battery_level", 0)
-
-            if status == "idle" and battery > 30:
-                available_agvs.append((agv_id, battery))
-
-        if not available_agvs:
-            return None
-
-        # Sort by battery level (highest first) and return the best AGV
-        available_agvs.sort(key=lambda x: x[1], reverse=True)
-        return available_agvs[0][0]
-
-    def _generate_p3_command_sequence(
-        self, agv_id: str, product_id: str, stage: str
-    ) -> List[Dict[str, Any]]:
-        """Generate the exact P3 command sequence based on the stage."""
-        commands = []
-        timestamp = datetime.now().timestamp()
-
-        if stage == "start_p3_production":
-            # P3 Stage 1: RawMaterial → StationA
-            commands = [
-                {
-                    "command_id": f"p3_start_{timestamp}_move_to_raw",
-                    "action": "move",
-                    "target": agv_id,
-                    "params": {"target_point": "P0"},
-                },
-                {
-                    "command_id": f"p3_start_{timestamp}_load_raw",
-                    "action": "load",
-                    "target": agv_id,
-                    "params": {"product_id": product_id},
-                },
-                {
-                    "command_id": f"p3_start_{timestamp}_move_to_station_a",
-                    "action": "move",
-                    "target": agv_id,
-                    "params": {"target_point": "P1"},
-                },
-                {
-                    "command_id": f"p3_start_{timestamp}_unload_station_a",
-                    "action": "unload",
-                    "target": agv_id,
-                    "params": {},
-                },
-            ]
-
-        elif stage == "continue_p3_processing":
-            # P3 Stage 2: Conveyor_CQ → StationB (second processing) - MUST use AGV_2
-            if agv_id != "AGV_2":
-                logger.error(
-                    f"P3 second processing attempted with {agv_id}, but only AGV_2 can access upper_buffer!"
-                )
-                return []
-
-            commands = [
-                {
-                    "command_id": f"p3_continue_{timestamp}_move_to_conveyor_cq",
-                    "action": "move",
-                    "target": "AGV_2",  # Force AGV_2 for P3 second processing
-                    "params": {"target_point": "P6"},
-                },
-                {
-                    "command_id": f"p3_continue_{timestamp}_load_conveyor_cq",
-                    "action": "load",
-                    "target": "AGV_2",  # Force AGV_2 for P3 second processing
-                    "params": {"product_id": product_id},
-                },
-                {
-                    "command_id": f"p3_continue_{timestamp}_move_to_station_b",
-                    "action": "move",
-                    "target": "AGV_2",  # Force AGV_2 for P3 second processing
-                    "params": {"target_point": "P3"},
-                },
-                {
-                    "command_id": f"p3_continue_{timestamp}_unload_station_b",
-                    "action": "unload",
-                    "target": "AGV_2",  # Force AGV_2 for P3 second processing
-                    "params": {},
-                },
-            ]
-
-        elif stage == "finish_p3_production":
-            # P3 Stage 3: QualityCheck → Warehouse
-            commands = [
-                {
-                    "command_id": f"p3_finish_{timestamp}_move_to_quality",
-                    "action": "move",
-                    "target": agv_id,
-                    "params": {"target_point": "P8"},
-                },
-                {
-                    "command_id": f"p3_finish_{timestamp}_load_quality",
-                    "action": "load",
-                    "target": agv_id,
-                    "params": {"product_id": product_id},
-                },
-                {
-                    "command_id": f"p3_finish_{timestamp}_move_to_warehouse",
-                    "action": "move",
-                    "target": agv_id,
-                    "params": {"target_point": "P9"},
-                },
-                {
-                    "command_id": f"p3_finish_{timestamp}_unload_warehouse",
-                    "action": "unload",
-                    "target": agv_id,
-                    "params": {},
-                },
-            ]
-
-        return commands
-
-    def _generate_p1_p2_command_sequence(
-        self, agv_id: str, product_id: str, stage: str
-    ) -> List[Dict[str, Any]]:
-        """Generate P1/P2 command sequence."""
-        commands = []
-        timestamp = datetime.now().timestamp()
-
-        if stage == "start_p1_p2_production":
-            # P1/P2: RawMaterial → StationA
-            commands = [
-                {
-                    "command_id": f"p1_p2_start_{timestamp}_move_to_raw",
-                    "action": "move",
-                    "target": agv_id,
-                    "params": {"target_point": "P0"},
-                },
-                {
-                    "command_id": f"p1_p2_start_{timestamp}_load_raw",
-                    "action": "load",
-                    "target": agv_id,
-                    "params": {"product_id": product_id},
-                },
-                {
-                    "command_id": f"p1_p2_start_{timestamp}_move_to_station_a",
-                    "action": "move",
-                    "target": agv_id,
-                    "params": {"target_point": "P1"},
-                },
-                {
-                    "command_id": f"p1_p2_start_{timestamp}_unload_station_a",
-                    "action": "unload",
-                    "target": agv_id,
-                    "params": {},
-                },
-            ]
-
-        elif stage == "finish_p1_p2_production":
-            # P1/P2: QualityCheck → Warehouse
-            commands = [
-                {
-                    "command_id": f"p1_p2_finish_{timestamp}_move_to_quality",
-                    "action": "move",
-                    "target": agv_id,
-                    "params": {"target_point": "P8"},
-                },
-                {
-                    "command_id": f"p1_p2_finish_{timestamp}_load_quality",
-                    "action": "load",
-                    "target": agv_id,
-                    "params": {"product_id": product_id},
-                },
-                {
-                    "command_id": f"p1_p2_finish_{timestamp}_move_to_warehouse",
-                    "action": "move",
-                    "target": agv_id,
-                    "params": {"target_point": "P9"},
-                },
-                {
-                    "command_id": f"p1_p2_finish_{timestamp}_unload_warehouse",
-                    "action": "unload",
-                    "target": agv_id,
-                    "params": {},
-                },
-            ]
-
-        return commands
