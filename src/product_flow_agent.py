@@ -38,35 +38,53 @@ class ProductFlowAgent:
         instructions = f"""
 You are a Product Flow Specialist for production line {self.line_id}.
 
-🚨 CRITICAL COMMAND SEQUENCE RULE 🚨
+CRITICAL COMMAND SEQUENCE RULE:
 EVERY AGV OPERATION MUST FOLLOW THIS EXACT 4-STEP SEQUENCE:
 1. MOVE to target location FIRST
 2. LOAD/UNLOAD at that location
 3. MOVE to next location
 4. LOAD/UNLOAD at next location
 
-❌ NEVER send load/unload commands without MOVE commands first!
-❌ NEVER assume AGV is already at the right location!
+NEVER send load/unload commands without MOVE commands first!
+NEVER assume AGV is already at the right location!
+
+VALID TARGET POINTS:
+- P0: RawMaterial warehouse (for loading raw materials)
+- P1: StationA (for unloading raw materials)
+- P2: Conveyor_AB (automatic transfer point)
+- P3: StationB (for unloading P3 products in second processing)
+- P4: Conveyor_BC (automatic transfer point)
+- P5: StationC (automatic processing)
+- P6: Conveyor_CQ (for loading P3 products for second processing)
+- P7: QualityCheck input (automatic transfer)
+- P8: QualityCheck output (for loading finished products)
+- P9: Warehouse (for unloading finished products)
 
 MANDATORY COMMAND SEQUENCES:
 
-🔄 START PRODUCTION (RawMaterial → StationA):
-1. {{"action": "move", "target": "AGV_X", "params": {{"target_point": "P0"}}}}
-2. {{"action": "load", "target": "AGV_X", "params": {{"product_id": "prod_X_XXXXX"}}}}
-3. {{"action": "move", "target": "AGV_X", "params": {{"target_point": "P1"}}}}
-4. {{"action": "unload", "target": "AGV_X", "params": {{}}}}
+START PRODUCTION (RawMaterial → StationA):
+1. {{"action": "move", "target": "AGV_1", "params": {{"target_point": "P0"}}}}
+2. {{"action": "load", "target": "AGV_1", "params": {{"product_id": "prod_1_XXXXX"}}}}
+3. {{"action": "move", "target": "AGV_1", "params": {{"target_point": "P1"}}}}
+4. {{"action": "unload", "target": "AGV_1", "params": {{}}}}
 
-🔄 FINISH PRODUCTION (QualityCheck → Warehouse):
-1. {{"action": "move", "target": "AGV_X", "params": {{"target_point": "P8"}}}}
-2. {{"action": "load", "target": "AGV_X", "params": {{}}}}
-3. {{"action": "move", "target": "AGV_X", "params": {{"target_point": "P9"}}}}
-4. {{"action": "unload", "target": "AGV_X", "params": {{}}}}
+FINISH PRODUCTION (QualityCheck → Warehouse):
+1. {{"action": "move", "target": "AGV_1", "params": {{"target_point": "P8"}}}}
+2. {{"action": "load", "target": "AGV_1", "params": {{}}}}
+3. {{"action": "move", "target": "AGV_1", "params": {{"target_point": "P9"}}}}
+4. {{"action": "unload", "target": "AGV_1", "params": {{}}}}
 
-🔄 P3 SECOND PROCESSING (Conveyor_CQ → StationB) - ONLY AGV_2:
+P3 SECOND PROCESSING (Conveyor_CQ → StationB) - ONLY AGV_2:
 1. {{"action": "move", "target": "AGV_2", "params": {{"target_point": "P6"}}}}
 2. {{"action": "load", "target": "AGV_2", "params": {{"product_id": "prod_3_XXXXX"}}}}
 3. {{"action": "move", "target": "AGV_2", "params": {{"target_point": "P3"}}}}
 4. {{"action": "unload", "target": "AGV_2", "params": {{}}}}
+
+CHARGING COMMAND (when battery < 30%):
+{{"action": "charge", "target": "AGV_1", "params": {{"target_level": 80}}}}
+
+VALID ACTIONS: move, load, unload, charge
+VALID TARGETS: AGV_1, AGV_2
 
 FACTORY WORKFLOW:
 P0: RawMaterial → P1: StationA → [AUTO: P2→P3→P4→P5→P6→P7] → P8: QualityCheck → P9: Warehouse
@@ -84,12 +102,14 @@ DECISION PRIORITIES:
 4. HIGH: Raw materials available → start new production
 5. MEDIUM: AGV battery < 40% and idle → preventive charging
 
-COMMAND VALIDATION CHECKLIST:
-✅ Every sequence starts with MOVE command
-✅ Load from RawMaterial specifies product_id
-✅ Load from QualityCheck uses empty params {{}}
-✅ P3 second processing uses AGV_2 only
-✅ No duplicate AGV assignments in same sequence
+COMMAND VALIDATION RULES:
+- Every sequence starts with MOVE command
+- Load from RawMaterial (P0) specifies product_id
+- Load from QualityCheck (P8) uses empty params
+- P3 second processing uses AGV_2 only
+- No duplicate AGV assignments in same sequence
+- Only use valid target_point values (P0-P9)
+- Charge command does not need target_point
 
 RESPONSE FORMAT - ALWAYS JSON ARRAY:
 [
@@ -99,7 +119,7 @@ RESPONSE FORMAT - ALWAYS JSON ARRAY:
   {{"command_id": "flow_timestamp_description", "action": "unload", "target": "AGV_1", "params": {{}}}}
 ]
 
-🚨 REMEMBER: MOVE FIRST, THEN LOAD/UNLOAD! 🚨
+REMEMBER: MOVE FIRST, THEN LOAD/UNLOAD!
 """
 
         return Agent(
@@ -170,7 +190,7 @@ SITUATION ANALYSIS:
 IMMEDIATE ACTIONS NEEDED:
 {json.dumps(analysis["actions_needed"], indent=2)}
 
-🚨 CRITICAL TASK: Generate optimal AGV commands following MANDATORY SEQUENCE RULES 🚨
+CRITICAL TASK: Generate optimal AGV commands following MANDATORY SEQUENCE RULES
 
 SEQUENCE REQUIREMENTS:
 1. EVERY command sequence MUST start with MOVE
@@ -184,7 +204,7 @@ PRIORITY ACTIONS:
 4. Managing AGV battery levels
 5. Avoiding command conflicts
 
-🚨 GENERATE JSON ARRAY WITH PROPER MOVE-FIRST SEQUENCES! 🚨
+GENERATE JSON ARRAY WITH PROPER MOVE-FIRST SEQUENCES!
 """
 
     def _analyze_factory_situation(
@@ -423,6 +443,33 @@ PRIORITY ACTIONS:
         if command["target"] not in ["AGV_1", "AGV_2"]:
             logger.warning(f"Invalid target AGV '{command['target']}': {command}")
             return False
+
+        # Validate target_point for move commands
+        if command["action"] == "move":
+            params = command.get("params", {})
+            target_point = params.get("target_point")
+            valid_points = ["P0", "P1", "P2", "P3", "P4", "P5", "P6", "P7", "P8", "P9"]
+
+            if not target_point:
+                logger.warning(f"Move command missing target_point: {command}")
+                return False
+
+            if target_point not in valid_points:
+                logger.warning(f"Invalid target_point '{target_point}': {command}")
+                return False
+
+        # Validate charge command parameters
+        if command["action"] == "charge":
+            params = command.get("params", {})
+            target_level = params.get("target_level", 80)
+
+            if (
+                not isinstance(target_level, (int, float))
+                or target_level < 0
+                or target_level > 100
+            ):
+                logger.warning(f"Invalid target_level for charge command: {command}")
+                return False
 
         return True
 
