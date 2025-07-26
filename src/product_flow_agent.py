@@ -21,8 +21,9 @@ class ProductFlowAgent:
     Specialized agent that understands product flow and generates optimal AGV commands.
     """
 
-    def __init__(self, line_id: str):
+    def __init__(self, line_id: str, shared_order_manager=None):
         self.line_id = line_id
+        self.shared_order_manager = shared_order_manager
         self.agent = self._create_product_flow_agent()
         self.session = SQLiteSession(f"product_flow_agent_{line_id}_session")
 
@@ -38,15 +39,13 @@ class ProductFlowAgent:
         instructions = f"""
 You are a Product Flow Specialist for production line {self.line_id}.
 
-CRITICAL COMMAND SEQUENCE RULE:
-EVERY AGV OPERATION MUST FOLLOW THIS EXACT 4-STEP SEQUENCE:
-1. MOVE to target location FIRST
-2. LOAD/UNLOAD at that location
-3. MOVE to next location
-4. LOAD/UNLOAD at next location
+CRITICAL RULE: GENERATE COMMANDS FOR AVAILABLE AGVs ONLY
+AGV operations take time to complete. You can send commands to different AGVs simultaneously, but only ONE command per AGV at a time.
 
-NEVER send load/unload commands without MOVE commands first!
-NEVER assume AGV is already at the right location!
+AVAILABLE AGVs: AGV_1, AGV_2
+- If both AGVs are available, you can generate up to 2 commands (one for each AGV)
+- If only one AGV is available, generate only 1 command for that AGV
+- NEVER send multiple commands to the same AGV
 
 VALID TARGET POINTS:
 - P0: RawMaterial warehouse (for loading raw materials)
@@ -60,27 +59,27 @@ VALID TARGET POINTS:
 - P8: QualityCheck output (for loading finished products)
 - P9: Warehouse (for unloading finished products)
 
-MANDATORY COMMAND SEQUENCES:
+COMMAND SEQUENCE LOGIC:
+1. If AGV needs to move to a location, send MOVE command first
+2. Wait for move completion before sending LOAD/UNLOAD
+3. If AGV needs to go to another location, send another MOVE command
+4. Wait for move completion before next LOAD/UNLOAD
 
-START PRODUCTION (RawMaterial → StationA):
-1. {{"action": "move", "target": "AGV_1", "params": {{"target_point": "P0"}}}}
-2. {{"action": "load", "target": "AGV_1", "params": {{"product_id": "prod_1_XXXXX"}}}}
-3. {{"action": "move", "target": "AGV_1", "params": {{"target_point": "P1"}}}}
-4. {{"action": "unload", "target": "AGV_1", "params": {{}}}}
+EXAMPLE SINGLE COMMANDS:
 
-FINISH PRODUCTION (QualityCheck → Warehouse):
-1. {{"action": "move", "target": "AGV_1", "params": {{"target_point": "P8"}}}}
-2. {{"action": "load", "target": "AGV_1", "params": {{}}}}
-3. {{"action": "move", "target": "AGV_1", "params": {{"target_point": "P9"}}}}
-4. {{"action": "unload", "target": "AGV_1", "params": {{}}}}
+Move to RawMaterial:
+{{"action": "move", "target": "AGV_1", "params": {{"target_point": "P0"}}}}
 
-P3 SECOND PROCESSING (Conveyor_CQ → StationB) - ONLY AGV_2:
-1. {{"action": "move", "target": "AGV_2", "params": {{"target_point": "P6"}}}}
-2. {{"action": "load", "target": "AGV_2", "params": {{"product_id": "prod_3_XXXXX"}}}}
-3. {{"action": "move", "target": "AGV_2", "params": {{"target_point": "P3"}}}}
-4. {{"action": "unload", "target": "AGV_2", "params": {{}}}}
+Load from RawMaterial:
+{{"action": "load", "target": "AGV_1", "params": {{"product_id": "prod_1_XXXXX"}}}}
 
-CHARGING COMMAND (when battery < 30%):
+Move to StationA:
+{{"action": "move", "target": "AGV_1", "params": {{"target_point": "P1"}}}}
+
+Unload at StationA:
+{{"action": "unload", "target": "AGV_1", "params": {{}}}}
+
+Charge AGV:
 {{"action": "charge", "target": "AGV_1", "params": {{"target_level": 80}}}}
 
 VALID ACTIONS: move, load, unload, charge
@@ -103,23 +102,25 @@ DECISION PRIORITIES:
 5. MEDIUM: AGV battery < 40% and idle → preventive charging
 
 COMMAND VALIDATION RULES:
-- Every sequence starts with MOVE command
+- Generate only ONE command per request
+- If AGV is not at target location, send MOVE command first
 - Load from RawMaterial (P0) specifies product_id
 - Load from QualityCheck (P8) uses empty params
 - P3 second processing uses AGV_2 only
-- No duplicate AGV assignments in same sequence
 - Only use valid target_point values (P0-P9)
 - Charge command does not need target_point
 
-RESPONSE FORMAT - ALWAYS JSON ARRAY:
+RESPONSE FORMAT - COMMANDS FOR AVAILABLE AGVs:
+For single AGV:
+{{"command_id": "flow_timestamp_description", "action": "move", "target": "AGV_1", "params": {{"target_point": "P0"}}}}
+
+For multiple AGVs (if both available):
 [
-  {{"command_id": "flow_timestamp_description", "action": "move", "target": "AGV_1", "params": {{"target_point": "P0"}}}},
-  {{"command_id": "flow_timestamp_description", "action": "load", "target": "AGV_1", "params": {{"product_id": "prod_1_abc123"}}}},
-  {{"command_id": "flow_timestamp_description", "action": "move", "target": "AGV_1", "params": {{"target_point": "P1"}}}},
-  {{"command_id": "flow_timestamp_description", "action": "unload", "target": "AGV_1", "params": {{}}}}
+  {{"command_id": "flow_timestamp_agv1", "action": "move", "target": "AGV_1", "params": {{"target_point": "P0"}}}},
+  {{"command_id": "flow_timestamp_agv2", "action": "move", "target": "AGV_2", "params": {{"target_point": "P8"}}}}
 ]
 
-REMEMBER: MOVE FIRST, THEN LOAD/UNLOAD!
+REMEMBER: ONE COMMAND PER AGV - DIFFERENT AGVs CAN WORK SIMULTANEOUSLY!
 """
 
         return Agent(
@@ -128,34 +129,79 @@ REMEMBER: MOVE FIRST, THEN LOAD/UNLOAD!
             model=os.getenv("model", "gpt-4.1-mini"),
         )
 
-    async def generate_flow_commands(
-        self, factory_state: Dict[str, Any], context_type: str = "planned"
+    async def generate_commands_for_available_agvs(
+        self, factory_state: Dict[str, Any]
     ) -> List[Dict[str, Any]]:
-        """Generate commands based on current factory state and product flow logic."""
+        """Generate commands for available AGVs based on current factory state."""
 
         # Create context for the agent
-        context = self._create_flow_context(factory_state, context_type)
+        context = self._create_flow_context(factory_state)
+
+        # Log context for debugging
+        logger.debug(f"Agent context length: {len(context)}")
+        logger.debug(f"Agent context preview: {context[:500]}...")
 
         try:
             # Run the agent
             result = await Runner.run(self.agent, context, session=self.session)
 
-            # Parse commands
+            # Check if we got a valid result
+            if not result or not hasattr(result, "final_output"):
+                logger.warning("Agent returned no result or invalid result structure")
+                logger.warning(f"Result type: {type(result)}")
+                logger.warning(f"Result content: {result}")
+                return []
+
+            # Log the raw AI output for debugging
+            logger.info(f"Raw AI output: '{result.final_output}'")
+            logger.info(f"AI output type: {type(result.final_output)}")
+            logger.info(
+                f"AI output length: {len(str(result.final_output)) if result.final_output else 0}"
+            )
+
+            # Parse commands (can be single command or list)
             commands = self._parse_agent_output(result.final_output)
 
-            # Update ongoing operations tracking
-            self._update_ongoing_operations(commands)
+            if commands:
+                # Update ongoing operations tracking
+                self._update_ongoing_operations(commands)
+                logger.info(f"Generated {len(commands)} commands for available AGVs")
+                return commands
+            else:
+                logger.info("No commands generated - checking if fallback is needed")
+                # Check if we should generate a simple fallback command
+                fallback_command = self._generate_fallback_command(factory_state)
+                if fallback_command:
+                    logger.info(f"Generated fallback command: {fallback_command}")
+                    return [fallback_command]
 
-            logger.info(f"Generated {len(commands)} product flow commands")
-            return commands
+                # Log factory state summary to help debug why no commands were generated
+                agvs = factory_state.get("agvs", {})
+                warehouse = factory_state.get("warehouse", {})
+                stations = factory_state.get("stations", {})
+
+                raw_products = len(warehouse.get("buffer", []))
+                quality_products = len(
+                    stations.get("QualityCheck", {}).get("output_buffer", [])
+                )
+
+                logger.info(
+                    f"Factory summary: Raw materials: {raw_products}, Finished products: {quality_products}"
+                )
+                for agv_id, agv_data in agvs.items():
+                    status = agv_data.get("status", "unknown")
+                    battery = agv_data.get("battery_level", 0)
+                    point = agv_data.get("current_point", "unknown")
+                    logger.info(f"{agv_id}: {status} at {point}, battery {battery}%")
+
+                return []
 
         except Exception as e:
             logger.error(f"Error generating flow commands: {e}")
+            logger.error(f"Context length: {len(context) if context else 0}")
             return []
 
-    def _create_flow_context(
-        self, factory_state: Dict[str, Any], context_type: str
-    ) -> str:
+    def _create_flow_context(self, factory_state: Dict[str, Any]) -> str:
         """Create context for the product flow agent."""
 
         # Extract key information
@@ -170,7 +216,6 @@ REMEMBER: MOVE FIRST, THEN LOAD/UNLOAD!
         )
 
         context_data = {
-            "context_type": context_type,
             "line_id": self.line_id,
             "timestamp": datetime.now().isoformat(),
             "factory_state": factory_state,
@@ -178,33 +223,130 @@ REMEMBER: MOVE FIRST, THEN LOAD/UNLOAD!
             "ongoing_operations": self.ongoing_operations,
         }
 
+        # Create simplified summary
+        agv_summary = []
+        for agv_id in ["AGV_1", "AGV_2"]:
+            agv_data = agvs.get(agv_id, {})
+            status = agv_data.get("status", "unknown")
+            battery = agv_data.get("battery_level", 0)
+            point = agv_data.get("current_point", "unknown")
+            payload_count = len(agv_data.get("payload", []))
+
+            # Determine availability
+            if status == "unknown" and battery == 0:
+                agv_summary.append(f"{agv_id}: AVAILABLE (startup)")
+            elif status in ["idle", "moving"] and battery > 10:
+                agv_summary.append(
+                    f"{agv_id}: AVAILABLE ({status}, {battery}%, @{point}, load:{payload_count})"
+                )
+            else:
+                agv_summary.append(f"{agv_id}: BUSY ({status}, {battery}%)")
+
+        # Detailed action summary with line-specific considerations
+        action_summary = []
+        available_agv_count = 0
+
+        for action in analysis["actions_needed"]:
+            if action["action"] == "start_new_production":
+                raw_count = len(action.get("raw_products", []))
+                next_products = action.get("next_products", [])
+                # Show specific product IDs that this line should process
+                if next_products:
+                    next_product_str = ", ".join(next_products)
+                    action_summary.append(
+                        f"Raw materials: {raw_count} (next: {next_product_str})"
+                    )
+                else:
+                    p1_count = len(
+                        [
+                            p
+                            for p in action.get("p1_p2_raw_products", [])
+                            if "prod_1" in p
+                        ]
+                    )
+                    p2_count = len(
+                        [
+                            p
+                            for p in action.get("p1_p2_raw_products", [])
+                            if "prod_2" in p
+                        ]
+                    )
+                    p3_count = len(action.get("p3_raw_products", []))
+                    action_summary.append(
+                        f"Raw materials: {raw_count} (P1:{p1_count}, P2:{p2_count}, P3:{p3_count})"
+                    )
+            elif action["action"] == "deliver_finished_products":
+                finished_count = len(action.get("products", []))
+                action_summary.append(f"Finished products: {finished_count}")
+            elif action["action"] == "continue_p3_processing":
+                p3_count = len(action.get("p3_products", []))
+                action_summary.append(f"P3 2nd processing: {p3_count}")
+            elif action["action"] == "emergency_charging":
+                agv_id = action.get("agv_id", "unknown")
+                battery = action.get("battery_level", 0)
+                action_summary.append(f"{agv_id} charging: {battery}%")
+
+        # Count available AGVs and get their detailed status
+        for agv_id in ["AGV_1", "AGV_2"]:
+            agv_data = agvs.get(agv_id, {})
+            status = agv_data.get("status", "unknown")
+            battery = agv_data.get("battery_level", 0)
+
+            if (status == "unknown" and battery == 0) or (
+                status in ["idle", "moving"] and battery > 10
+            ):
+                available_agv_count += 1
+
+        # Add station status summary
+        station_summary = []
+        for station_id in ["StationA", "StationB", "StationC", "QualityCheck"]:
+            station_data = stations.get(station_id, {})
+            status = station_data.get("status", "unknown")
+            buffer_count = len(station_data.get("buffer", []))
+            output_count = len(station_data.get("output_buffer", []))
+
+            if status == "processing":
+                station_summary.append(f"{station_id}:processing")
+            elif buffer_count > 0 or output_count > 0:
+                station_summary.append(
+                    f"{station_id}:products({buffer_count + output_count})"
+                )
+            elif status == "idle":
+                station_summary.append(f"{station_id}:idle")
+
+        # Add conveyor status for P3 products
+        conveyor_summary = []
+        conveyor_cq = conveyors.get("Conveyor_CQ", {})
+        upper_count = len(conveyor_cq.get("upper_buffer", []))
+        lower_count = len(conveyor_cq.get("lower_buffer", []))
+        if upper_count > 0 or lower_count > 0:
+            conveyor_summary.append(
+                f"CQ_buffers:upper({upper_count}),lower({lower_count})"
+            )
+
         return f"""
-PRODUCT FLOW ANALYSIS - {context_type.upper()} OPERATION
+LINE: {self.line_id},
+STATUS: {available_agv_count} AGVs available, {len(action_summary)} actions needed
 
-Current Factory State:
-{json.dumps(context_data, indent=2)}
+AGVs: {" | ".join(agv_summary)}
 
-SITUATION ANALYSIS:
-{analysis["summary"]}
+ACTIONS: {" | ".join(action_summary) if action_summary else "None"}
 
-IMMEDIATE ACTIONS NEEDED:
-{json.dumps(analysis["actions_needed"], indent=2)}
+STATIONS: {" | ".join(station_summary) if station_summary else "All idle"}
 
-CRITICAL TASK: Generate optimal AGV commands following MANDATORY SEQUENCE RULES
+CONVEYORS: {" | ".join(conveyor_summary) if conveyor_summary else "idle"}
 
-SEQUENCE REQUIREMENTS:
-1. EVERY command sequence MUST start with MOVE
-2. NEVER send load/unload without moving to location first
-3. Follow the 4-step pattern: MOVE → LOAD/UNLOAD → MOVE → LOAD/UNLOAD
+DECISION LOGIC FOR THIS LINE:
+1. Emergency: Battery < 20% → charge
+2. High: Finished products → move to P8, then load, then move to P9, then unload
+3. High: P3 upper_buffer → AGV_2 move to P6, then load specific P3 product, then move to P3, then unload
+4. High: Raw materials → move to P0, then load specific product ID, then move to P1, then unload
+5. Medium: Position AGVs optimally
 
-PRIORITY ACTIONS:
-1. Completing urgent deliveries (QualityCheck → Warehouse) - MOVE to P8 first!
-2. Starting new production (RawMaterial → StationA) - MOVE to P0 first!
-3. Continuing P3 double processing (Conveyor_CQ → StationB) - MOVE to P6 first!
-4. Managing AGV battery levels
-5. Avoiding command conflicts
+IMPORTANT: When loading from P0 (RawMaterial), specify the exact product_id in load command
+Example: [{{"command_id":"cmd_123","action":"load","target":"AGV_1","params":{{"product_id":"prod_1_abc123"}}}}]
 
-GENERATE JSON ARRAY WITH PROPER MOVE-FIRST SEQUENCES!
+RESPOND JSON ONLY: [] or [{{"command_id":"cmd_123","action":"move","target":"AGV_X","params":{{"target_point":"P0"}}}}]
 """
 
     def _analyze_factory_situation(
@@ -294,26 +436,35 @@ GENERATE JSON ARRAY WITH PROPER MOVE-FIRST SEQUENCES!
         # Check for raw materials available (HIGH PRIORITY for new production)
         raw_products = raw_material.get("buffer", [])
         if len(raw_products) > 0:
-            # Identify P3 products in raw materials
-            p3_raw_products = [
-                p for p in raw_products if isinstance(p, str) and "prod_3" in p
-            ]
-            p1_p2_raw_products = [
-                p
-                for p in raw_products
-                if isinstance(p, str) and ("prod_1" in p or "prod_2" in p)
-            ]
+            # Get products actually assigned to this line from order management
+            line_assigned_products = self._get_line_assigned_raw_products(raw_products)
 
-            analysis["actions_needed"].append(
-                {
-                    "action": "start_new_production",
-                    "priority": "high",
-                    "details": f"{len(raw_products)} raw materials available (P1/P2: {len(p1_p2_raw_products)}, P3: {len(p3_raw_products)})",
-                    "raw_products": raw_products,
-                    "p3_raw_products": p3_raw_products,
-                    "p1_p2_raw_products": p1_p2_raw_products,
-                }
-            )
+            if line_assigned_products:
+                # Identify P3 products in line-assigned materials
+                p3_raw_products = [
+                    p
+                    for p in line_assigned_products
+                    if isinstance(p, str) and "prod_3" in p
+                ]
+                p1_p2_raw_products = [
+                    p
+                    for p in line_assigned_products
+                    if isinstance(p, str) and ("prod_1" in p or "prod_2" in p)
+                ]
+
+                analysis["actions_needed"].append(
+                    {
+                        "action": "start_new_production",
+                        "priority": "high",
+                        "details": f"{len(line_assigned_products)} raw materials assigned to {self.line_id} (P1/P2: {len(p1_p2_raw_products)}, P3: {len(p3_raw_products)})",
+                        "raw_products": line_assigned_products,  # Only products assigned to this line
+                        "next_products": line_assigned_products[
+                            :3
+                        ],  # First 3 assigned products
+                        "p3_raw_products": p3_raw_products,
+                        "p1_p2_raw_products": p1_p2_raw_products,
+                    }
+                )
 
         # Check AGV status for battery management
         for agv_id, agv_data in agvs.items():
@@ -358,34 +509,250 @@ GENERATE JSON ARRAY WITH PROPER MOVE-FIRST SEQUENCES!
 
         return analysis
 
+    def _get_line_assigned_raw_products(self, all_raw_products: List[str]) -> List[str]:
+        """Get raw products that are assigned to this specific line."""
+        if not self.shared_order_manager:
+            # Fallback: distribute products by line index to avoid conflicts
+            line_index = int(self.line_id[-1]) - 1  # line1=0, line2=1, line3=2
+            return [p for i, p in enumerate(all_raw_products) if i % 3 == line_index]
+
+        try:
+            # Get orders assigned to this line
+            line_orders = self.shared_order_manager.get_orders_for_line(self.line_id)
+
+            # Determine what product types this line needs to produce
+            needed_product_types = []
+            for order in line_orders:
+                for product in order.products:
+                    if hasattr(product, "product_type") and hasattr(product, "status"):
+                        # Only consider products that are still pending (need raw materials)
+                        if product.status.value == "pending":
+                            product_type_str = product.product_type.value  # P1, P2, P3
+                            needed_product_types.append(product_type_str)
+
+            logger.info(
+                f"Line {self.line_id} needs product types: {needed_product_types}"
+            )
+
+            # Match raw materials to needed product types
+            assigned_raw_products = []
+            needed_types_copy = (
+                needed_product_types.copy()
+            )  # Don't modify original list
+
+            for raw_product_id in all_raw_products:
+                # Extract product type from raw material ID (e.g., prod_1_abc -> P1)
+                if "prod_1" in raw_product_id and "P1" in needed_types_copy:
+                    assigned_raw_products.append(raw_product_id)
+                    needed_types_copy.remove("P1")  # Remove one instance
+                elif "prod_2" in raw_product_id and "P2" in needed_types_copy:
+                    assigned_raw_products.append(raw_product_id)
+                    needed_types_copy.remove("P2")
+                elif "prod_3" in raw_product_id and "P3" in needed_types_copy:
+                    assigned_raw_products.append(raw_product_id)
+                    needed_types_copy.remove("P3")
+
+            # If we still have unmatched needed types, try to get any available materials of those types
+            if needed_types_copy:  # Still have unmatched product types
+                logger.info(
+                    f"Line {self.line_id} still needs {needed_types_copy} but no matching raw materials found"
+                )
+
+                # Try to get any remaining materials of the needed types (first-come-first-served)
+                for raw_product_id in all_raw_products:
+                    if (
+                        raw_product_id not in assigned_raw_products
+                    ):  # Not already assigned
+                        if "prod_1" in raw_product_id and "P1" in needed_types_copy:
+                            assigned_raw_products.append(raw_product_id)
+                            needed_types_copy.remove("P1")
+                        elif "prod_2" in raw_product_id and "P2" in needed_types_copy:
+                            assigned_raw_products.append(raw_product_id)
+                            needed_types_copy.remove("P2")
+                        elif "prod_3" in raw_product_id and "P3" in needed_types_copy:
+                            assigned_raw_products.append(raw_product_id)
+                            needed_types_copy.remove("P3")
+
+            # Final fallback: if still no assignments and this line has orders, distribute by index
+            if not assigned_raw_products and needed_product_types:
+                logger.warning(
+                    f"Line {self.line_id} has orders but no matching raw materials, using index distribution"
+                )
+                line_index = int(self.line_id[-1]) - 1
+                assigned_raw_products = [
+                    p for i, p in enumerate(all_raw_products) if i % 3 == line_index
+                ]
+
+            return assigned_raw_products
+
+        except Exception as e:
+            logger.warning(f"Error getting line-assigned products: {e}")
+            # Fallback: distribute products by line index
+            line_index = int(self.line_id[-1]) - 1
+            return [p for i, p in enumerate(all_raw_products) if i % 3 == line_index]
+
+    def _generate_fallback_command(
+        self, factory_state: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Generate a simple fallback command when AI fails to generate commands but action is clearly needed."""
+        agvs = factory_state.get("agvs", {})
+        warehouse = factory_state.get("warehouse", {})
+        stations = factory_state.get("stations", {})
+
+        # Find an available AGV
+        available_agv = None
+        for agv_id in ["AGV_1", "AGV_2"]:
+            agv_data = agvs.get(agv_id, {})
+            status = agv_data.get("status", "unknown")
+            battery = agv_data.get("battery_level", 0)
+
+            # Consider AGV available if unknown status (startup) or idle with good battery
+            if (status == "unknown" and battery == 0) or (
+                status == "idle" and battery > 20
+            ):
+                available_agv = agv_id
+                break
+
+        if not available_agv:
+            return {}
+
+        # Check for raw materials to start production
+        raw_products = warehouse.get("buffer", [])
+        if raw_products:
+            # Get products assigned to this line
+            line_assigned_products = self._get_line_assigned_raw_products(raw_products)
+            if line_assigned_products:
+                first_product = line_assigned_products[0]
+                timestamp = datetime.now().timestamp()
+                return {
+                    "command_id": f"fallback_{self.line_id}_{timestamp}",
+                    "action": "move",
+                    "target": available_agv,
+                    "params": {"target_point": "P0"},
+                    "next_load_product": first_product,  # Include product ID for next load command
+                }
+
+        # Check for finished products to deliver
+        quality_check = stations.get("QualityCheck", {})
+        finished_products = quality_check.get("output_buffer", [])
+        if finished_products:
+            timestamp = datetime.now().timestamp()
+            return {
+                "command_id": f"fallback_{timestamp}",
+                "action": "move",
+                "target": available_agv,
+                "params": {"target_point": "P8"},
+            }
+
+        return {}
+
+    def _get_available_agvs_info(self, agvs: Dict[str, Any]) -> str:
+        """Get information about which AGVs are available for commands."""
+        available_info = []
+
+        for agv_id in ["AGV_1", "AGV_2"]:
+            agv_data = agvs.get(agv_id, {})
+            status = agv_data.get("status", "unknown")
+            battery = agv_data.get("battery_level", 0)
+            current_point = agv_data.get("current_point", "unknown")
+            payload = agv_data.get("payload", [])
+
+            # If AGV data is missing or invalid, assume it's available (factory might be starting up)
+            if status == "unknown" and battery == 0:
+                logger.warning(
+                    f"{agv_id} has unknown status - assuming available for startup"
+                )
+                available_info.append(f"{agv_id}: AVAILABLE (startup mode)")
+            # Check if AGV is available for new commands
+            elif (
+                status in ["idle", "moving"]
+                and agv_id not in self.ongoing_operations["agv_charging"]
+                and battery > 10
+            ):
+                available_info.append(
+                    f"{agv_id}: AVAILABLE (status={status}, battery={battery}%, at={current_point}, payload={len(payload)})"
+                )
+            else:
+                available_info.append(
+                    f"{agv_id}: BUSY (status={status}, battery={battery}%)"
+                )
+
+        return " | ".join(available_info)
+
     def _parse_agent_output(self, agent_output: Any) -> List[Dict[str, Any]]:
-        """Parse agent output into command list."""
+        """Parse agent output into command list (can be single command or multiple)."""
         try:
             commands = []
 
+            # Handle empty or None output
+            if not agent_output:
+                logger.info("Agent returned empty output - no commands needed")
+                return []
+
             if isinstance(agent_output, dict):
-                commands = agent_output.get("commands", [])
+                # Direct command object - wrap in list
+                commands = [agent_output]
             elif isinstance(agent_output, str):
+                # Clean up the string
+                agent_output = agent_output.strip()
+
+                if not agent_output:
+                    logger.info("Agent returned empty string - no commands needed")
+                    return []
+
+                # Log what we're trying to parse
+                logger.info(
+                    f"Attempting to parse string output: '{agent_output[:200]}...'"
+                )
+
                 # Handle JSON in markdown code blocks
-                if agent_output.strip().startswith("```json"):
+                if agent_output.startswith("```json"):
+                    logger.info("Found JSON markdown block")
                     json_str = agent_output.split("```json")[1].split("```")[0].strip()
-                    commands = json.loads(json_str)
+                    if not json_str:
+                        logger.info("Empty JSON block - no commands needed")
+                        return []
+                    parsed = json.loads(json_str)
                 else:
                     # Try to extract JSON from potentially mixed content
+                    logger.info("Extracting JSON from mixed content")
                     cleaned_output = self._extract_json_from_text(agent_output)
-                    commands = json.loads(cleaned_output)
+                    if not cleaned_output:
+                        logger.warning(f"No JSON found in output: '{agent_output}'")
+                        return []
+                    logger.info(f"Extracted JSON: '{cleaned_output}'")
+                    parsed = json.loads(cleaned_output)
+
+                # Handle both single command and array
+                if isinstance(parsed, list):
+                    commands = parsed
+                elif isinstance(parsed, dict):
+                    commands = [parsed]
             elif isinstance(agent_output, list):
                 commands = agent_output
 
-            if not isinstance(commands, list):
-                logger.error(f"Agent output is not a list: {type(commands)}")
+            # Handle empty command list
+            if not commands:
+                logger.info("No commands in parsed output")
+                logger.info(
+                    f"Parsed data was: {parsed if 'parsed' in locals() else 'No parsed data'}"
+                )
                 return []
 
-            # Validate commands
+            # Validate commands and ensure no duplicate AGV targets
             validated_commands = []
+            used_agvs = set()
+
             for cmd in commands:
                 if self._validate_command(cmd):
-                    validated_commands.append(cmd)
+                    agv_target = cmd.get("target")
+                    if agv_target not in used_agvs:
+                        validated_commands.append(cmd)
+                        used_agvs.add(agv_target)
+                    else:
+                        logger.warning(
+                            f"Duplicate AGV target {agv_target} filtered out: {cmd}"
+                        )
                 else:
                     logger.warning(f"Invalid command filtered out: {cmd}")
 
@@ -393,15 +760,31 @@ GENERATE JSON ARRAY WITH PROPER MOVE-FIRST SEQUENCES!
 
         except json.JSONDecodeError as e:
             logger.error(f"Failed to parse agent output as JSON: {e}")
-            logger.debug(f"Problematic output: {agent_output}")
+            logger.error(f"Raw agent output: '{agent_output}'")
+            logger.error(f"Output type: {type(agent_output)}")
+            logger.error(
+                f"Output length: {len(str(agent_output)) if agent_output else 0}"
+            )
             return []
         except Exception as e:
             logger.error(f"Error parsing agent output: {e}")
+            logger.error(f"Raw agent output: '{agent_output}'")
             return []
 
     def _extract_json_from_text(self, text: str) -> str:
         """Extract JSON from text that may contain extra content."""
         import re
+
+        if not text or not text.strip():
+            return ""
+
+        text = text.strip()
+
+        # If it already looks like JSON, return it
+        if (text.startswith("[") and text.endswith("]")) or (
+            text.startswith("{") and text.endswith("}")
+        ):
+            return text
 
         # Try to find JSON array or object in the text
         json_patterns = [
@@ -420,8 +803,9 @@ GENERATE JSON ARRAY WITH PROPER MOVE-FIRST SEQUENCES!
                     except json.JSONDecodeError:
                         continue
 
-        # If no valid JSON found, return original text
-        return text.strip()
+        # If no valid JSON found, return empty string
+        logger.warning(f"No valid JSON found in text: '{text[:100]}...'")
+        return ""
 
     def _validate_command(self, command: Dict[str, Any]) -> bool:
         """Validate command structure and logic."""

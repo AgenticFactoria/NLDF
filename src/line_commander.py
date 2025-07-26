@@ -6,13 +6,10 @@ and coordinates AGV operations for a production line.
 """
 
 import asyncio
-import json
 import logging
-import os
 from datetime import datetime
 from typing import Any, Dict, List
 
-from agents import Agent, SQLiteSession
 from shared_order_manager import SharedOrderManager
 from src.mqtt_listener_manager import MQTTListenerManager
 from src.product_flow_agent import ProductFlowAgent
@@ -36,15 +33,11 @@ class LineCommander:
         # Order management
         self.shared_order_manager = SharedOrderManager()
 
-        # Available AGVs for this line (must be defined before agent creation)
+        # Available AGVs for this line
         self.active_agvs = ["AGV_1", "AGV_2"]
 
-        # AI Agents for decision making
-        self.agent = self._create_line_commander_agent()
-        self.session = SQLiteSession(f"line_commander_{line_id}_session")
-
         # Specialized product flow agent
-        self.product_flow_agent = ProductFlowAgent(line_id)
+        self.product_flow_agent = ProductFlowAgent(line_id, self.shared_order_manager)
 
         # Decision making state
         self.decision_queue = asyncio.Queue(maxsize=100)
@@ -59,91 +52,6 @@ class LineCommander:
 
         # Register handlers with MQTT listener
         self._register_mqtt_handlers()
-
-    def _create_line_commander_agent(self) -> Agent:
-        """Create the line commander AI agent."""
-        instructions = f"""
-You are the Line Commander for production line {self.line_id} in an automated factory.
-
-MISSION:
-- Coordinate AGV operations ({", ".join(self.active_agvs)}) to maximize production efficiency
-- Monitor all line status (stations, AGVs, conveyors, warehouse) and react to changes
-- Optimize for KPI metrics: order completion rate, production cycle efficiency, AGV utilization
-- Handle both planned production and reactive responses to factory events
-
-FACTORY LAYOUT & WORKFLOW:
-P0: RawMaterial → P1: StationA → P2: Conveyor_AB → P3: StationB → P4: Conveyor_BC → P5: StationC → P6: Conveyor_CQ → P7-P8: QualityCheck → P9: Warehouse
-
-SUCCESSFUL PRODUCT FLOW EXAMPLE (P1/P2 products):
-1. AGV moves to P0 (RawMaterial)
-2. AGV loads product with specific product_id from RawMaterial buffer
-3. AGV moves to P1 (StationA) 
-4. AGV unloads product to StationA buffer
-5. StationA processes product automatically (5s) → moves to Conveyor_AB
-6. Conveyor_AB transfers product automatically (5s) → moves to StationB
-7. StationB processes product automatically (5s) → moves to Conveyor_BC
-8. Conveyor_BC transfers product automatically (5s) → moves to StationC
-9. StationC processes product automatically (5s) → moves to Conveyor_CQ
-10. Conveyor_CQ transfers product automatically (5s) → moves to QualityCheck
-11. QualityCheck processes product automatically (5s) → moves to output_buffer
-12. AGV moves to P8 (QualityCheck pickup point)
-13. AGV loads finished product from QualityCheck output_buffer
-14. AGV moves to P9 (Warehouse)
-15. AGV unloads finished product to Warehouse
-
-PRODUCT TYPES & FLOWS:
-- P1/P2: Single pass A→B→C→QualityCheck (as shown above)
-- P3: Double pass A→B→C→(AGV pickup from Conveyor_CQ upper/lower buffer)→B→C→QualityCheck
-
-KEY UNDERSTANDING:
-- Stations process products automatically once they receive them
-- Conveyors transfer products automatically between stations
-- AGV is only needed for: RawMaterial→StationA and QualityCheck→Warehouse
-- For P3 products: Additional AGV transport from Conveyor_CQ buffer back to StationB
-
-STATUS MONITORING:
-- Station status: idle/processing, buffer (input), output_buffer (for QualityCheck)
-- AGV status: idle/moving/interacting, current_point, battery_level, payload
-- Conveyor status: working, buffer, upper_buffer, lower_buffer (for Conveyor_CQ)
-- Warehouse status: buffer (available products), stats (product counts by type)
-
-DECISION PRIORITIES:
-1. CRITICAL: AGV battery < 20%, equipment failures
-2. HIGH: Products available in RawMaterial buffer, finished products in QualityCheck output_buffer
-3. MEDIUM: AGV positioning, preventive charging (battery < 40%)
-4. LOW: Optimization moves
-
-AVAILABLE COMMANDS:
-1. move: Move AGV to location (P0-P9)
-2. load: Load product onto AGV (specify product_id at RawMaterial, auto-detect at QualityCheck)
-3. unload: Unload product from AGV at current location
-4. charge: Send AGV to charge (when battery < 30%, target_level default 80%)
-
-RESPONSE FORMAT:
-Always respond with JSON array of commands:
-[
-  {{
-    "command_id": "cmd_timestamp_description",
-    "action": "move|load|unload|charge",
-    "target": "AGV_1|AGV_2",
-    "params": {{"target_point": "P1", "product_id": "prod_...", "target_level": 80.0}},
-  }}
-]
-
-STRATEGIC THINKING:
-- Focus on the two critical AGV tasks: RawMaterial pickup and QualityCheck delivery
-- Monitor RawMaterial buffer for available products to start production
-- Monitor QualityCheck output_buffer for finished products to deliver
-- Keep AGVs charged and positioned efficiently
-- Balance workload between AGVs
-- Prioritize order completion and throughput
-"""
-
-        return Agent(
-            name=f"LineCommander_{self.line_id}",
-            instructions=instructions,
-            model=os.getenv("model", "gpt-4.1-mini"),
-        )
 
     def _register_mqtt_handlers(self):
         """Register handlers for different types of MQTT messages."""
@@ -408,7 +316,7 @@ STRATEGIC THINKING:
 
     async def _main_decision_cycle(self):
         """Main decision-making cycle for planned operations."""
-        logger.info("Starting main decision cycle...")
+        logger.info(f"Starting main decision cycle for {self.line_id}...")
 
         while self.is_running:
             try:
@@ -420,7 +328,7 @@ STRATEGIC THINKING:
 
     async def _reactive_decision_processor(self):
         """Process reactive decisions from queued events."""
-        logger.info("Starting reactive decision processor...")
+        logger.info(f"Starting reactive decision processor for {self.line_id}...")
 
         while self.is_running:
             try:
@@ -440,27 +348,11 @@ STRATEGIC THINKING:
 
     async def _process_planned_operations(self):
         """Process planned operations - regular order fulfillment."""
-        logger.info("Processing planned operations...")
+        logger.debug(f"Processing planned operations for {self.line_id}...")
 
-        # Get current factory state
-        factory_state = self.mqtt_listener.get_factory_state()
-
-        # Get available orders
-        available_orders = self.shared_order_manager.get_orders_for_line(self.line_id)
-        orders_to_process = available_orders[: self.max_orders_per_cycle]
-
-        if not orders_to_process:
-            logger.debug("No orders available for planned processing")
-            return
-
-        # Create context for agent
-        context = self._create_agent_context(
-            factory_state, orders_to_process, "planned"
-        )
-
-        # Generate and execute commands
-        commands = await self._generate_agent_commands(context)
-        await self._execute_commands(commands, "planned")
+        # Generate and execute commands for available AGVs
+        commands = await self._generate_agent_commands()
+        await self._execute_commands(commands)
 
     async def _process_reactive_event(self, event: Dict[str, Any]):
         """Process a single reactive event."""
@@ -469,161 +361,54 @@ STRATEGIC THINKING:
 
         logger.info(f"Processing reactive event: {event_type} (severity: {severity})")
 
-        # Get current factory state
-        factory_state = self.mqtt_listener.get_factory_state()
+        # Generate and execute commands for available AGVs
+        commands = await self._generate_agent_commands()
+        await self._execute_commands(commands)
 
-        # Create context for reactive decision
-        context = self._create_reactive_context(factory_state, event)
-
-        # Generate and execute commands
-        commands = await self._generate_agent_commands(context)
-        await self._execute_commands(commands, "reactive", event_type)
-
-    def _create_agent_context(
-        self, factory_state: Dict[str, Any], orders: List, operation_type: str
-    ) -> str:
-        """Create context string for the agent."""
-
-        # Get products needing transport
-        products_needing_transport = self.shared_order_manager.get_products_for_line(
-            self.line_id
-        )
-
-        # Recent command history
-        recent_commands = self.command_history[-5:] if self.command_history else []
-
-        context_data = {
-            "operation_type": operation_type,
-            "line_id": self.line_id,
-            "current_time": datetime.now().isoformat(),
-            "factory_state": factory_state,
-            "orders_to_process": [
-                {
-                    "order_id": order.order_id,
-                    "status": order.status.value,
-                    "products": [
-                        {
-                            "product_id": p.product_id,
-                            "product_type": p.product_type.value,
-                            "status": p.status.value,
-                            "current_location": p.current_location,
-                            "next_step": p.get_next_processing_step(),
-                        }
-                        for p in order.products
-                    ],
-                }
-                for order in orders
-            ],
-            "products_needing_transport": [
-                {
-                    "product_id": p.product_id,
-                    "product_type": p.product_type.value,
-                    "status": p.status.value,
-                    "current_location": p.current_location,
-                    "next_step": p.get_next_processing_step(),
-                }
-                for p in products_needing_transport
-            ],
-            "recent_commands": recent_commands,
-            "available_agvs": self.active_agvs,
-        }
-
-        return f"""
-FACTORY OPERATION CONTEXT:
-{json.dumps(context_data, indent=2)}
-
-TASK: Analyze the current factory state and generate optimal AGV commands for {operation_type} operations.
-
-Consider:
-1. Current AGV positions, battery levels, and payloads
-2. Station statuses and buffer levels
-3. Product flow requirements and priorities
-4. Order deadlines and priorities
-5. Recent command history and results
-
-Generate commands to optimize production flow and KPI metrics.
-Respond with JSON array of commands only.
-"""
-
-    def _create_reactive_context(
-        self, factory_state: Dict[str, Any], event: Dict[str, Any]
-    ) -> str:
-        """Create context for reactive decision making."""
-
-        context_data = {
-            "operation_type": "reactive",
-            "line_id": self.line_id,
-            "current_time": datetime.now().isoformat(),
-            "factory_state": factory_state,
-            "trigger_event": event,
-            "recent_commands": self.command_history[-3:]
-            if self.command_history
-            else [],
-            "available_agvs": self.active_agvs,
-        }
-
-        return f"""
-REACTIVE FACTORY EVENT:
-{json.dumps(context_data, indent=2)}
-
-URGENT TASK: A {event["data"].get("severity", "medium")} severity event has occurred requiring immediate response.
-
-Event Type: {event["type"]}
-Event Details: {json.dumps(event["data"], indent=2)}
-
-Analyze the situation and provide immediate corrective actions.
-Focus on addressing the specific issue while maintaining overall production flow.
-
-Respond with JSON array of commands only. Maximum 3 commands for focused response.
-"""
-
-    async def _generate_agent_commands(self, context: str) -> List[Dict[str, Any]]:
-        """Generate commands using the specialized product flow agent."""
+    async def _generate_agent_commands(self) -> List[Dict[str, Any]]:
+        """Generate commands for available AGVs using the specialized product flow agent."""
         try:
             # Get current factory state from MQTT listener
             factory_state = self.mqtt_listener.get_factory_state()
 
-            # Determine context type from the context string
-            context_type = (
-                "reactive" if "REACTIVE FACTORY EVENT" in context else "planned"
+            # Use specialized product flow agent for command generation
+            commands = (
+                await self.product_flow_agent.generate_commands_for_available_agvs(
+                    factory_state
+                )
             )
 
-            # Use specialized product flow agent for better command generation
-            commands = await self.product_flow_agent.generate_flow_commands(
-                factory_state, context_type
-            )
+            if commands:
+                logger.info(
+                    f"Generated {len(commands)} commands for available AGVs for for {self.line_id}"
+                )
+            else:
+                logger.debug("No commands generated - no action needed")
 
-            logger.info(f"Generated {len(commands)} commands from product flow agent")
             return commands
 
         except Exception as e:
             logger.error(f"Error generating agent commands: {e}")
             return []
 
-    async def _execute_commands(
-        self,
-        commands: List[Dict[str, Any]],
-        operation_type: str,
-        event_type: str = None,
-    ):
-        """Execute generated commands."""
+    async def _execute_commands(self, commands: List[Dict[str, Any]]):
+        """Execute commands for different AGVs."""
         if not commands:
-            logger.debug(f"No commands to execute for {operation_type} operation")
+            logger.debug("No commands to execute")
             return
 
-        logger.info(f"Executing {len(commands)} {operation_type} commands")
+        logger.info(
+            f"Executing {len(commands)} commands for different AGVs for {self.line_id}"
+        )
 
         for command in commands:
             try:
                 # Ensure command has required fields
                 if "command_id" not in command:
                     timestamp = datetime.now().timestamp()
-                    command["command_id"] = f"{operation_type}_{timestamp}"
+                    command["command_id"] = f"cmd_{timestamp}"
 
-                # Add metadata
-                command["operation_type"] = operation_type
-                if event_type:
-                    command["trigger_event"] = event_type
+                # Add timestamp
                 command["timestamp"] = datetime.now().timestamp()
 
                 # Publish command
@@ -635,15 +420,14 @@ Respond with JSON array of commands only. Maximum 3 commands for focused respons
                         "command_id": command["command_id"],
                         "command": command,
                         "timestamp": datetime.now().timestamp(),
-                        "operation_type": operation_type,
                     }
                 )
 
                 logger.info(
-                    f"Executed {operation_type} command: {command['command_id']}"
+                    f"Executed command: {command['command_id']} - {command['action']} for {command['target']}"
                 )
 
-                # Small delay between commands
+                # Small delay between commands to different AGVs
                 await asyncio.sleep(0.1)
 
             except Exception as e:
